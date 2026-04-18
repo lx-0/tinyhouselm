@@ -18,6 +18,7 @@ Reference: [joonspk-research/generative_agents](https://github.com/joonspk-resea
 packages/
   sim/        # simulation engine (tick loop, world, agents)
   shared/     # shared types for sim <-> renderer
+  web/        # live browser renderer (HTTP + SSE, canvas client)
 world/
   agents/<id>/SKILL.md     # personas in agentskills.io format
   agents/<id>/memory/      # para-memory per agent (gitignored content)
@@ -30,6 +31,7 @@ world/
 pnpm install
 pnpm hello          # one-agent hello-world tick loop
 pnpm sim            # load every persona in world/agents and tick the runtime
+pnpm web            # live browser view at http://localhost:5173
 pnpm test           # vitest
 pnpm typecheck
 pnpm lint
@@ -40,6 +42,10 @@ pnpm lint
   persona under `world/agents/` (agentskills.io format), wires a per-agent
   `para-memory` tree, ticks the runtime, and prints an event log. Use
   `--help` for the full flag list.
+- `pnpm web` boots an HTTP server that runs the simulation in-process and
+  streams snapshots + deltas over Server-Sent Events to a canvas client.
+  Config via env: `PORT`, `SIM_SPEED`, `TICK_MS`, `SEED`, `WORLD_W`,
+  `WORLD_H`.
 
 ## Architecture
 
@@ -55,5 +61,5 @@ See the [TINA-2 plan document](./docs/architecture.md) — or open the issue in 
 - `TINA-2` — architecture + bootstrap + hello-world tick loop ✅
 - `TINA-3` — `agentskills.io` loader + per-agent memory + multi-agent runtime ✅
 - `TINA-4` — zones + goto + agent-to-agent conversations (with both-sided memory) ✅
-- `TINA-5` — pixelated renderer
+- `TINA-5` — pixelated renderer ✅
 - `TINA-6` — 100+ personas, telemetry, optimization

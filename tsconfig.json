@@ -1,4 +1,8 @@
 {
   "files": [],
-  "references": [{ "path": "./packages/sim" }, { "path": "./packages/shared" }]
+  "references": [
+    { "path": "./packages/sim" },
+    { "path": "./packages/shared" },
+    { "path": "./packages/web" }
+  ]
 }

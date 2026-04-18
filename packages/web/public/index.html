@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Tina — live simulation</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        background: #0f0d15;
+        color: #e7e5ee;
+        font-family: -apple-system, system-ui, Segoe UI, sans-serif;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 24px;
+        gap: 14px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 14px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #b9b0dc;
+      }
+      #stats {
+        font-size: 12px;
+        opacity: 0.65;
+        font-family: ui-monospace, Menlo, monospace;
+      }
+      #stage {
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+        background: #1b1830;
+        border-radius: 8px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      }
+      #log {
+        width: 640px;
+        max-height: 160px;
+        overflow-y: auto;
+        font-size: 11px;
+        font-family: ui-monospace, Menlo, monospace;
+        opacity: 0.72;
+        padding: 8px 12px;
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 4px;
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>tina — live simulation</h1>
+    <div id="stats">connecting…</div>
+    <canvas id="stage" width="576" height="576"></canvas>
+    <div id="log"></div>
+    <script type="module" src="/client.js"></script>
+  </body>
+</html>

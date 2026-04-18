@@ -50,6 +50,12 @@ export class World {
     this.deltas.push(delta);
   }
 
+  drainDeltas(): Delta[] {
+    const flushed = this.deltas;
+    this.deltas = [];
+    return flushed;
+  }
+
   zoneAt(pos: Vec2): string | null {
     for (const zone of this.zones) {
       if (

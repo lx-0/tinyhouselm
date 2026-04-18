@@ -13,6 +13,7 @@
     "dev": "pnpm --filter @tina/sim dev",
     "hello": "pnpm --filter @tina/sim hello",
     "sim": "pnpm --filter @tina/sim sim",
+    "web": "pnpm --filter @tina/web web",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b",

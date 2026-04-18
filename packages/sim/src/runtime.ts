@@ -169,7 +169,7 @@ export class Runtime {
       agent.state.lastHeartbeatAt = simTime;
     }
 
-    this.sweepConversations(tick, simTime);
+    await this.sweepConversations(tick, simTime);
     this.tickIndex += 1;
     return deltas;
   }
@@ -328,7 +328,7 @@ export class Runtime {
     }
   }
 
-  private sweepConversations(tick: number, simTime: SimTime): void {
+  private async sweepConversations(tick: number, simTime: SimTime): Promise<void> {
     const positions = new Map<string, Vec2>();
     for (const agent of this.agents) positions.set(agent.def.id, agent.state.position);
     const pending: Array<{ session: ConversationSession; reason: 'drifted' | 'idle' }> = [];
@@ -336,7 +336,7 @@ export class Runtime {
       onClose: (session, reason) => pending.push({ session, reason }),
     });
     for (const { session, reason } of pending) {
-      void this.handleConversationClose(session, reason, tick, simTime);
+      await this.handleConversationClose(session, reason, tick, simTime);
     }
   }
 
