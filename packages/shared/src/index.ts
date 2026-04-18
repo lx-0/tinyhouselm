@@ -4,6 +4,7 @@ export type SimTime = number;
 
 export type AgentAction =
   | { kind: 'move_to'; to: Vec2 }
+  | { kind: 'goto'; target: Vec2; label?: string }
   | { kind: 'speak'; to: string | null; text: string }
   | { kind: 'wait'; seconds: number }
   | { kind: 'remember'; fact: string }
@@ -15,9 +16,17 @@ export type AgentSnap = {
   position: Vec2;
   facing: 'N' | 'S' | 'E' | 'W';
   currentAction: string;
+  zone?: string | null;
+  gotoTarget?: Vec2 | null;
 };
 
 export type Zone = { name: string; x: number; y: number; width: number; height: number };
+
+export type ConversationTurn = {
+  speakerId: string;
+  text: string;
+  at: SimTime;
+};
 
 export type Snapshot = {
   kind: 'snapshot';
@@ -33,6 +42,20 @@ export type Delta =
   | { kind: 'agent_action'; id: string; action: string }
   | { kind: 'speech'; id: string; text: string; heardBy: string[]; ttlMs: number }
   | { kind: 'agent_spawn'; agent: AgentSnap }
-  | { kind: 'agent_despawn'; id: string };
+  | { kind: 'agent_despawn'; id: string }
+  | {
+      kind: 'conversation_open';
+      sessionId: string;
+      participants: string[];
+      simTime: SimTime;
+    }
+  | {
+      kind: 'conversation_close';
+      sessionId: string;
+      participants: string[];
+      transcript: ConversationTurn[];
+      simTime: SimTime;
+      reason: 'drifted' | 'idle';
+    };
 
 export type StreamMessage = Snapshot | Delta;

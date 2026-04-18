@@ -55,13 +55,14 @@ export function inferPersonaHints(persona: SkillDocument): PersonaHints {
 /**
  * Deterministic rule-based heartbeat policy. Each agent reasons over its
  * perception packet with a persona-seeded RNG so runs are reproducible.
- * Swap this for an LLM-backed policy later (TINA-4+).
+ * Swap this for an LLM-backed policy later.
  */
 export class DefaultHeartbeatPolicy implements HeartbeatPolicy {
   async decide(ctx: HeartbeatContext): Promise<AgentAction[]> {
     const { persona, perception, rng } = ctx;
     const hints = inferPersonaHints(persona);
     const actions: AgentAction[] = [];
+    const hasGoto = !!perception.self.gotoTarget;
 
     if (perception.tick === 0) {
       actions.push({
@@ -88,8 +89,19 @@ export class DefaultHeartbeatPolicy implements HeartbeatPolicy {
       actions.push({ kind: 'speak', to: null, text });
     }
 
-    if (rng() < hints.restlessness) {
-      const next = stepToward(perception.self.position, perception, rng);
+    if (!hasGoto && perception.nearby.length === 0 && perception.zones.length > 0) {
+      if (rng() < hints.restlessness * 0.5) {
+        const zone = pick(rng, perception.zones);
+        if (zone) {
+          const cx = Math.floor(zone.x + zone.width / 2);
+          const cy = Math.floor(zone.y + zone.height / 2);
+          actions.push({ kind: 'goto', target: { x: cx, y: cy }, label: zone.name });
+        }
+      }
+    }
+
+    if (!hasGoto && rng() < hints.restlessness) {
+      const next = wanderStep(perception.self.position, perception, rng);
       if (next) actions.push({ kind: 'move_to', to: next });
     }
 
@@ -117,7 +129,7 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
-function stepToward(from: Vec2, perception: Perception, rng: Rng): Vec2 | null {
+function wanderStep(from: Vec2, perception: Perception, rng: Rng): Vec2 | null {
   const target = perception.nearby[0];
   const bounds = perception.worldBounds;
   let dx = 0;

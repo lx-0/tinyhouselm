@@ -19,10 +19,18 @@ export {
   chebyshevDistance,
   nearbyAgents,
   describeAction,
+  stepToward,
 } from './perception.js';
 export type { Perception, TimeOfDay, HeardSpeech } from './perception.js';
 export { DefaultHeartbeatPolicy, inferPersonaHints, makeRngForAgent } from './heartbeat.js';
 export type { HeartbeatPolicy, HeartbeatContext, PersonaHints } from './heartbeat.js';
+export { ConversationRegistry } from './conversation.js';
+export type {
+  ConversationSession,
+  ConversationObserver,
+  ConversationOptions,
+  CloseReason,
+} from './conversation.js';
 export { Runtime } from './runtime.js';
 export type { RuntimeOptions, RuntimeAgent, RuntimeEvent } from './runtime.js';
 export { seededRng, mulberry32, hashString, pick } from './rng.js';

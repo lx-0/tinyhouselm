@@ -13,6 +13,9 @@ export interface AgentState {
   facing: 'N' | 'S' | 'E' | 'W';
   currentAction: string;
   lastHeartbeatAt: SimTime;
+  gotoTarget: Vec2 | null;
+  gotoLabel: string | null;
+  zone: string | null;
 }
 
 export class Agent {
@@ -26,6 +29,9 @@ export class Agent {
       facing: initial.facing ?? 'S',
       currentAction: initial.currentAction ?? 'idle',
       lastHeartbeatAt: initial.lastHeartbeatAt ?? 0,
+      gotoTarget: initial.gotoTarget ?? null,
+      gotoLabel: initial.gotoLabel ?? null,
+      zone: initial.zone ?? null,
     };
   }
 
@@ -36,6 +42,8 @@ export class Agent {
       position: { ...this.state.position },
       facing: this.state.facing,
       currentAction: this.state.currentAction,
+      zone: this.state.zone,
+      gotoTarget: this.state.gotoTarget ? { ...this.state.gotoTarget } : null,
     };
   }
 
@@ -44,6 +52,13 @@ export class Agent {
       case 'move_to':
         this.state.position = { ...action.to };
         this.state.currentAction = `moving to (${action.to.x},${action.to.y})`;
+        break;
+      case 'goto':
+        this.state.gotoTarget = { ...action.target };
+        this.state.gotoLabel = action.label ?? null;
+        this.state.currentAction = action.label
+          ? `heading to ${action.label}`
+          : `heading to (${action.target.x},${action.target.y})`;
         break;
       case 'speak':
         this.state.currentAction = `speaking: "${action.text.slice(0, 40)}"`;

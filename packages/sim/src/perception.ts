@@ -1,4 +1,4 @@
-import type { AgentAction, AgentSnap, SimTime, Vec2 } from '@tina/shared';
+import type { AgentAction, AgentSnap, SimTime, Vec2, Zone } from '@tina/shared';
 import type { Agent } from './agent.js';
 import type { MemoryFact } from './memory.js';
 
@@ -20,6 +20,7 @@ export interface Perception {
   recentSpeech: HeardSpeech[];
   recentFacts: MemoryFact[];
   worldBounds: { width: number; height: number };
+  zones: Zone[];
 }
 
 const DAY_SECONDS = 86400;
@@ -60,6 +61,10 @@ export function describeAction(action: AgentAction): string {
   switch (action.kind) {
     case 'move_to':
       return `move to (${action.to.x},${action.to.y})`;
+    case 'goto':
+      return action.label
+        ? `goto ${action.label} (${action.target.x},${action.target.y})`
+        : `goto (${action.target.x},${action.target.y})`;
     case 'speak':
       return `speak "${action.text}"`;
     case 'wait':
@@ -69,4 +74,10 @@ export function describeAction(action: AgentAction): string {
     case 'remember':
       return `remember "${action.fact.slice(0, 60)}"`;
   }
+}
+
+export function stepToward(from: Vec2, to: Vec2): Vec2 {
+  const dx = Math.sign(to.x - from.x);
+  const dy = Math.sign(to.y - from.y);
+  return { x: from.x + dx, y: from.y + dy };
 }

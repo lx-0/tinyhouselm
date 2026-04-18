@@ -3,10 +3,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SimulationClock } from './clock.js';
+import type { HeartbeatPolicy } from './heartbeat.js';
 import { ParaMemory } from './memory.js';
 import { Runtime, type RuntimeEvent } from './runtime.js';
 import { type SkillDocument, parseSkillSource } from './skills.js';
 import { World } from './world.js';
+
+const silentPolicy: HeartbeatPolicy = {
+  async decide() {
+    return [];
+  },
+};
 
 const personas: Array<{ name: string; description: string }> = [
   { name: 'alpha', description: 'extrovert, energetic, social' },
@@ -51,6 +58,8 @@ function actionKey(e: RuntimeEvent): string {
   switch (action.kind) {
     case 'move_to':
       return `${e.tick}:${e.agentId}:move:${action.to.x},${action.to.y}`;
+    case 'goto':
+      return `${e.tick}:${e.agentId}:goto:${action.target.x},${action.target.y}`;
     case 'speak':
       return `${e.tick}:${e.agentId}:speak:${action.text}`;
     case 'remember':
@@ -102,5 +111,47 @@ describe('Runtime', () => {
       (e) => e.kind === 'action' && e.action.kind === 'speak' && (e.heardBy?.length ?? 0) > 0,
     );
     expect(heardSomeone).toBe(true);
+  });
+
+  it('goto moves the agent one step per tick until arrival', async () => {
+    const events: RuntimeEvent[] = [];
+    const root = await mkdtemp(join(tmpdir(), 'tina-goto-'));
+    const world = new World({
+      width: 16,
+      height: 16,
+      clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
+    });
+    const runtime = new Runtime({
+      world,
+      policy: silentPolicy,
+      agents: [
+        {
+          skill: skillFor({ name: 'solo', description: 'quiet tired sedentary' }),
+          memory: new ParaMemory({
+            root,
+            now: () => new Date('2026-04-18T00:00:00Z'),
+          }),
+          initial: { position: { x: 2, y: 2 }, gotoTarget: { x: 7, y: 2 } },
+        },
+      ],
+      seed: 5,
+      tickMs: 100,
+      onEvent: (e) => events.push(e),
+    });
+
+    const trace: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < 10; i++) {
+      await runtime.tickOnce();
+      const solo = runtime.listAgents()[0]!;
+      trace.push({ ...solo.state.position });
+    }
+
+    const solo = runtime.listAgents()[0]!;
+    expect(solo.state.position).toEqual({ x: 7, y: 2 });
+    expect(solo.state.gotoTarget).toBeNull();
+    // one step per tick, monotonically, until arrival
+    expect(trace[0]).toEqual({ x: 3, y: 2 });
+    expect(trace[4]).toEqual({ x: 7, y: 2 });
+    expect(trace[5]).toEqual({ x: 7, y: 2 });
   });
 });

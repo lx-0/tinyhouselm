@@ -54,6 +54,6 @@ See the [TINA-2 plan document](./docs/architecture.md) — or open the issue in 
 
 - `TINA-2` — architecture + bootstrap + hello-world tick loop ✅
 - `TINA-3` — `agentskills.io` loader + per-agent memory + multi-agent runtime ✅
-- `TINA-4` — richer perception + agent-to-agent conversation + world model
+- `TINA-4` — zones + goto + agent-to-agent conversations (with both-sided memory) ✅
 - `TINA-5` — pixelated renderer
 - `TINA-6` — 100+ personas, telemetry, optimization

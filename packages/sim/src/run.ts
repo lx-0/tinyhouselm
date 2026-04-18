@@ -1,5 +1,6 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { Zone } from '@tina/shared';
 import { SimulationClock } from './clock.js';
 import { ParaMemory } from './memory.js';
 import { describeAction } from './perception.js';
@@ -126,22 +127,21 @@ async function loadSkills(opts: CliOptions): Promise<SkillDocument[]> {
   return loaded;
 }
 
-function layoutPositions(
-  count: number,
-  width: number,
-  height: number,
-): Array<{ x: number; y: number }> {
-  const cols = Math.max(1, Math.ceil(Math.sqrt(count)));
-  const rows = Math.max(1, Math.ceil(count / cols));
-  const gx = Math.floor(width / (cols + 1));
-  const gy = Math.floor(height / (rows + 1));
-  const out: Array<{ x: number; y: number }> = [];
-  for (let i = 0; i < count; i++) {
-    const c = i % cols;
-    const r = Math.floor(i / cols);
-    out.push({ x: (c + 1) * gx, y: (r + 1) * gy });
-  }
-  return out;
+function defaultZones(width: number, height: number): Zone[] {
+  const w = Math.max(4, Math.floor(width / 4));
+  const h = Math.max(4, Math.floor(height / 4));
+  return [
+    { name: 'cafe', x: 1, y: 1, width: w, height: h },
+    { name: 'park', x: width - w - 1, y: 1, width: w, height: h },
+    { name: 'home', x: Math.floor(width / 2 - w / 2), y: height - h - 1, width: w, height: h },
+  ];
+}
+
+function zoneAnchors(zones: Zone[]): Array<{ x: number; y: number }> {
+  return zones.map((z) => ({
+    x: Math.floor(z.x + z.width / 2),
+    y: Math.floor(z.y + z.height / 2),
+  }));
 }
 
 function pad(n: number | string, width: number): string {
@@ -163,6 +163,10 @@ function formatEvent(event: RuntimeEvent): string {
           : '';
       return `t=${t}  tick=${tick}  ${event.agentId.padEnd(16)}  ${describeAction(event.action)}${heard}`;
     }
+    case 'conversation_open':
+      return `t=${t}  tick=${tick}  conv_open  ${event.sessionId}  [${event.participants.join(', ')}]`;
+    case 'conversation_close':
+      return `t=${t}  tick=${tick}  conv_close ${event.sessionId}  [${event.participants.join(', ')}]  turns=${event.transcript.length}  reason=${event.reason}`;
   }
 }
 
@@ -178,18 +182,19 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const zones = defaultZones(opts.worldWidth, opts.worldHeight);
+  const anchors = zoneAnchors(zones);
   const positionRng = seededRng(`positions:${opts.seed}`);
-  const positions = layoutPositions(skills.length, opts.worldWidth, opts.worldHeight);
 
   const clock = new SimulationClock({
     mode: 'stepped',
     speed: 60,
     tickHz: 1000 / opts.tickMs,
   });
-  const world = new World({ width: opts.worldWidth, height: opts.worldHeight, clock });
+  const world = new World({ width: opts.worldWidth, height: opts.worldHeight, clock, zones });
 
   const runtimeAgents = skills.map((skill, i) => {
-    const basePos = positions[i]!;
+    const anchor = anchors[i % anchors.length]!;
     const jitter = {
       x: Math.floor(positionRng() * 3) - 1,
       y: Math.floor(positionRng() * 3) - 1,
@@ -199,8 +204,8 @@ async function main(): Promise<void> {
       memory: new ParaMemory({ root: `${skillDirectory(skill)}/memory` }),
       initial: {
         position: {
-          x: clamp(basePos.x + jitter.x, 0, opts.worldWidth - 1),
-          y: clamp(basePos.y + jitter.y, 0, opts.worldHeight - 1),
+          x: clamp(anchor.x + jitter.x, 0, opts.worldWidth - 1),
+          y: clamp(anchor.y + jitter.y, 0, opts.worldHeight - 1),
         },
       },
     };
@@ -230,21 +235,25 @@ async function main(): Promise<void> {
       `[tina] running ${skills.length} agents for ${opts.ticks} ticks @ ${opts.tickMs}ms/tick (seed=${opts.seed})`,
     );
     console.log(
-      `[tina] map ${opts.worldWidth}x${opts.worldHeight}  personas: ${skills.map((s) => s.id).join(', ')}`,
+      `[tina] map ${opts.worldWidth}x${opts.worldHeight}  zones: ${zones.map((z) => z.name).join(', ')}  personas: ${skills.map((s) => s.id).join(', ')}`,
     );
   }
 
   await runtime.runTicks(opts.ticks);
+  await runtime.flushConversations();
 
   if (!opts.json) {
     const actions = events.filter((e) => e.kind === 'action').length;
     const speeches = events.filter((e) => e.kind === 'action' && e.action.kind === 'speak').length;
     const moves = events.filter((e) => e.kind === 'action' && e.action.kind === 'move_to').length;
+    const gotos = events.filter((e) => e.kind === 'action' && e.action.kind === 'goto').length;
     const remembers = events.filter(
       (e) => e.kind === 'action' && e.action.kind === 'remember',
     ).length;
+    const opens = events.filter((e) => e.kind === 'conversation_open').length;
+    const closes = events.filter((e) => e.kind === 'conversation_close').length;
     console.log(
-      `[tina] done: ${opts.ticks} ticks, ${actions} actions (${moves} moves, ${speeches} speeches, ${remembers} remembered)`,
+      `[tina] done: ${opts.ticks} ticks, ${actions} actions (${moves} moves, ${gotos} gotos, ${speeches} speeches, ${remembers} remembered), ${opens} conversations opened, ${closes} closed`,
     );
   }
 }
