@@ -24,21 +24,38 @@ export interface AddFactInput {
   source?: string;
 }
 
+export type MemoryFlushMode = 'eager' | 'deferred';
+
 export interface ParaMemoryOptions {
   root: string;
   entity?: string;
   now?: () => Date;
+  /**
+   * eager (default): every addFact / appendDailyNote writes to disk immediately.
+   * deferred: writes are batched in-memory and only persisted on flush().
+   * Use deferred when the caller drives its own flush cadence (e.g. Runtime).
+   */
+  flushMode?: MemoryFlushMode;
 }
 
 export class ParaMemory {
   readonly root: string;
   readonly entity: string;
   private now: () => Date;
+  private flushMode: MemoryFlushMode;
+
+  private facts: MemoryFact[] | null = null;
+  private factsDirty = false;
+
+  private dailyBuffers = new Map<string, string>();
+  private dailyLoaded = new Set<string>();
+  private dailyDirty = new Set<string>();
 
   constructor(opts: ParaMemoryOptions) {
     this.root = opts.root;
     this.entity = opts.entity ?? 'self';
     this.now = opts.now ?? (() => new Date());
+    this.flushMode = opts.flushMode ?? 'eager';
   }
 
   private itemsPath(): string {
@@ -57,22 +74,54 @@ export class ParaMemory {
     return this.now().toISOString().slice(0, 10);
   }
 
-  async readFacts(): Promise<MemoryFact[]> {
+  private async loadFacts(): Promise<MemoryFact[]> {
+    if (this.facts !== null) return this.facts;
     const raw = await readFileOrEmpty(this.itemsPath());
-    if (!raw) return [];
+    if (!raw) {
+      this.facts = [];
+      return this.facts;
+    }
     const parsed = parseYaml(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as MemoryFact[];
+    this.facts = Array.isArray(parsed) ? (parsed as MemoryFact[]) : [];
+    return this.facts;
+  }
+
+  private async writeFactsNow(): Promise<void> {
+    if (this.facts === null) return;
+    await ensureDir(dirname(this.itemsPath()));
+    const body = this.facts.length === 0 ? '[]\n' : stringifyYaml(this.facts);
+    await writeFile(this.itemsPath(), body, 'utf8');
+    this.factsDirty = false;
+  }
+
+  private async loadDaily(day: string): Promise<string> {
+    if (this.dailyLoaded.has(day)) return this.dailyBuffers.get(day) ?? '';
+    const existing = (await readFileOrEmpty(this.dailyPath(day))) ?? '';
+    this.dailyBuffers.set(day, existing);
+    this.dailyLoaded.add(day);
+    return existing;
+  }
+
+  private async writeDailyNow(day: string): Promise<void> {
+    const body = this.dailyBuffers.get(day);
+    if (body === undefined) return;
+    await ensureDir(dirname(this.dailyPath(day)));
+    await writeFile(this.dailyPath(day), body, 'utf8');
+    this.dailyDirty.delete(day);
+  }
+
+  async readFacts(): Promise<MemoryFact[]> {
+    return [...(await this.loadFacts())];
   }
 
   async writeFacts(facts: MemoryFact[]): Promise<void> {
-    await ensureDir(dirname(this.itemsPath()));
-    const body = facts.length === 0 ? '[]\n' : stringifyYaml(facts);
-    await writeFile(this.itemsPath(), body, 'utf8');
+    this.facts = [...facts];
+    this.factsDirty = true;
+    if (this.flushMode === 'eager') await this.writeFactsNow();
   }
 
   async addFact(input: AddFactInput): Promise<MemoryFact> {
-    const facts = await this.readFacts();
+    const facts = await this.loadFacts();
     const date = this.today();
     const id = `${this.entity}-${facts.length + 1}`;
     const fact: MemoryFact = {
@@ -88,32 +137,35 @@ export class ParaMemory {
       access_count: 0,
     };
     facts.push(fact);
-    await this.writeFacts(facts);
+    this.factsDirty = true;
+    if (this.flushMode === 'eager') await this.writeFactsNow();
     return fact;
   }
 
   async recentActiveFacts(limit: number): Promise<MemoryFact[]> {
-    const facts = await this.readFacts();
+    const facts = await this.loadFacts();
     return facts.filter((f) => f.status === 'active').slice(-limit);
   }
 
   async supersede(factId: string, replacement: MemoryFact): Promise<void> {
-    const facts = await this.readFacts();
+    const facts = await this.loadFacts();
     const existing = facts.find((f) => f.id === factId);
     if (!existing) throw new Error(`fact ${factId} not found`);
     existing.status = 'superseded';
     existing.superseded_by = replacement.id;
     facts.push(replacement);
-    await this.writeFacts(facts);
+    this.factsDirty = true;
+    if (this.flushMode === 'eager') await this.writeFactsNow();
   }
 
   async appendDailyNote(text: string, date?: string): Promise<void> {
     const day = date ?? this.today();
-    const path = this.dailyPath(day);
-    await ensureDir(dirname(path));
-    const existing = (await readFileOrEmpty(path)) ?? '';
+    const existing = await this.loadDaily(day);
     const header = existing ? '' : `# ${day}\n\n`;
-    await writeFile(path, `${existing}${header}- ${text}\n`, 'utf8');
+    const updated = `${existing}${header}- ${text}\n`;
+    this.dailyBuffers.set(day, updated);
+    this.dailyDirty.add(day);
+    if (this.flushMode === 'eager') await this.writeDailyNow(day);
   }
 
   async readSummary(): Promise<string> {
@@ -127,11 +179,19 @@ export class ParaMemory {
 
   async seedFromTraits(lines: string[]): Promise<void> {
     if (lines.length === 0) return;
-    const facts = await this.readFacts();
+    const facts = await this.loadFacts();
     if (facts.length > 0) return;
     for (const line of lines) {
       await this.addFact({ fact: line, category: 'preference' });
     }
+  }
+
+  /** Persist any buffered writes. Safe to call repeatedly; no-op when clean. */
+  async flush(): Promise<void> {
+    const pending: Promise<void>[] = [];
+    if (this.factsDirty) pending.push(this.writeFactsNow());
+    for (const day of this.dailyDirty) pending.push(this.writeDailyNow(day));
+    if (pending.length > 0) await Promise.all(pending);
   }
 }
 

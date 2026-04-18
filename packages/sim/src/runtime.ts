@@ -13,6 +13,7 @@ import {
   timeOfDay,
 } from './perception.js';
 import type { SkillDocument } from './skills.js';
+import { TelemetryCollector, type TelemetrySnapshot } from './telemetry.js';
 import { World } from './world.js';
 
 export interface RuntimeAgent {
@@ -32,6 +33,13 @@ export interface RuntimeOptions {
   conversationIdleMs?: number;
   seed?: number;
   onEvent?: (event: RuntimeEvent) => void;
+  /**
+   * Flush every agent's buffered memory to disk every N ticks. Default 10.
+   * Set to 0 or a negative number to disable periodic flushing (callers must
+   * drive flush themselves via flushMemories()).
+   */
+  memoryFlushEveryTicks?: number;
+  telemetry?: TelemetryCollector;
 }
 
 export type RuntimeEvent =
@@ -87,7 +95,10 @@ export class Runtime {
   private readonly skills = new Map<string, SkillDocument>();
   private readonly recent: Recent = { speech: [] };
   private readonly conversations: ConversationRegistry;
+  private readonly memoryFlushEveryTicks: number;
+  readonly telemetry: TelemetryCollector;
   private tickIndex = 0;
+  private flushInFlight: Promise<void> | null = null;
 
   constructor(opts: RuntimeOptions) {
     this.tickMs = opts.tickMs ?? 100;
@@ -98,6 +109,8 @@ export class Runtime {
     this.seed = opts.seed ?? 0;
     this.policy = opts.policy ?? new DefaultHeartbeatPolicy();
     this.onEvent = opts.onEvent;
+    this.memoryFlushEveryTicks = opts.memoryFlushEveryTicks ?? 10;
+    this.telemetry = opts.telemetry ?? new TelemetryCollector();
     this.world =
       opts.world ??
       new World({
@@ -131,7 +144,7 @@ export class Runtime {
     this.memories.set(agent.def.id, entry.memory);
     this.skills.set(agent.def.id, entry.skill);
     this.world.addAgent(agent);
-    this.onEvent?.({ kind: 'spawn', agentId: agent.def.id, name: agent.def.name });
+    this.emit({ kind: 'spawn', agentId: agent.def.id, name: agent.def.name });
     return agent;
   }
 
@@ -139,12 +152,18 @@ export class Runtime {
     return [...this.agents];
   }
 
+  private emit(event: RuntimeEvent): void {
+    this.telemetry.observe(event);
+    this.onEvent?.(event);
+  }
+
   async tickOnce(): Promise<Delta[]> {
+    const tickStart = performance.now();
     const deltas = this.world.tick(this.tickMs);
     this.pruneRecent();
     const simTime = this.world.simTime;
     const tick = this.tickIndex;
-    this.onEvent?.({ kind: 'tick', tick, simTime });
+    this.emit({ kind: 'tick', tick, simTime });
 
     for (const agent of this.agents) {
       await this.stepGoto(agent, tick, simTime);
@@ -171,14 +190,48 @@ export class Runtime {
 
     await this.sweepConversations(tick, simTime);
     this.tickIndex += 1;
+    this.telemetry.setActiveConversations(this.conversations.activeCount());
+    this.telemetry.recordTickDuration(performance.now() - tickStart);
+    if (this.memoryFlushEveryTicks > 0 && this.tickIndex % this.memoryFlushEveryTicks === 0) {
+      this.schedulePeriodicFlush();
+    }
     return deltas;
+  }
+
+  /** Persist every agent's buffered memory to disk. */
+  async flushMemories(): Promise<void> {
+    if (this.flushInFlight) await this.flushInFlight;
+    const pending: Promise<void>[] = [];
+    for (const memory of this.memories.values()) pending.push(memory.flush());
+    if (pending.length > 0) await Promise.all(pending);
+  }
+
+  /**
+   * Kick off a periodic flush without blocking the tick loop. If a flush is
+   * already in flight we skip this round — the next period will catch up.
+   */
+  private schedulePeriodicFlush(): void {
+    if (this.flushInFlight) return;
+    const pending: Promise<void>[] = [];
+    for (const memory of this.memories.values()) pending.push(memory.flush());
+    if (pending.length === 0) return;
+    this.flushInFlight = Promise.all(pending)
+      .then(() => {})
+      .finally(() => {
+        this.flushInFlight = null;
+      });
+  }
+
+  telemetrySnapshot(): TelemetrySnapshot {
+    this.telemetry.setActiveConversations(this.conversations.activeCount());
+    return this.telemetry.snapshot();
   }
 
   async runTicks(n: number): Promise<void> {
     for (let i = 0; i < n; i++) await this.tickOnce();
   }
 
-  /** Flush any still-open sessions and persist their transcripts. */
+  /** Flush any still-open sessions and persist their transcripts. Also flushes memory. */
   async flushConversations(): Promise<void> {
     const simTime = this.world.simTime;
     const tick = this.tickIndex;
@@ -189,6 +242,7 @@ export class Runtime {
     for (const { session, reason } of pending) {
       await this.handleConversationClose(session, reason, tick, simTime);
     }
+    await this.flushMemories();
   }
 
   private async stepGoto(agent: Agent, tick: number, simTime: SimTime): Promise<void> {
@@ -240,7 +294,7 @@ export class Runtime {
           to: { ...action.to },
           durationMs: this.tickMs,
         });
-        this.onEvent?.({ kind: 'action', tick, simTime, agentId: agent.def.id, action });
+        this.emit({ kind: 'action', tick, simTime, agentId: agent.def.id, action });
         return;
       }
       case 'goto': {
@@ -250,7 +304,7 @@ export class Runtime {
           id: agent.def.id,
           action: agent.state.currentAction,
         });
-        this.onEvent?.({ kind: 'action', tick, simTime, agentId: agent.def.id, action });
+        this.emit({ kind: 'action', tick, simTime, agentId: agent.def.id, action });
         return;
       }
       case 'speak': {
@@ -286,7 +340,7 @@ export class Runtime {
                 participants: [...session.participants],
                 simTime,
               });
-              this.onEvent?.({
+              this.emit({
                 kind: 'conversation_open',
                 tick,
                 simTime,
@@ -296,7 +350,7 @@ export class Runtime {
             },
           });
         }
-        this.onEvent?.({
+        this.emit({
           kind: 'action',
           tick,
           simTime,
@@ -311,7 +365,7 @@ export class Runtime {
         const memory = this.memories.get(agent.def.id)!;
         await memory.addFact({ fact: action.fact, category: 'observation' });
         await memory.appendDailyNote(`t=${simTime.toFixed(1)}s ${action.fact}`);
-        this.onEvent?.({ kind: 'action', tick, simTime, agentId: agent.def.id, action });
+        this.emit({ kind: 'action', tick, simTime, agentId: agent.def.id, action });
         return;
       }
       case 'wait':
@@ -322,7 +376,7 @@ export class Runtime {
           id: agent.def.id,
           action: agent.state.currentAction,
         });
-        this.onEvent?.({ kind: 'action', tick, simTime, agentId: agent.def.id, action });
+        this.emit({ kind: 'action', tick, simTime, agentId: agent.def.id, action });
         return;
       }
     }
@@ -355,7 +409,7 @@ export class Runtime {
       simTime,
       reason,
     });
-    this.onEvent?.({
+    this.emit({
       kind: 'conversation_close',
       tick,
       simTime,

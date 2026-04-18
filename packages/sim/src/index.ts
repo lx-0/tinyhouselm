@@ -13,7 +13,13 @@ export {
 } from './skills.js';
 export type { SkillDocument, SkillFrontmatter } from './skills.js';
 export { ParaMemory } from './memory.js';
-export type { MemoryFact, FactCategory, AddFactInput, ParaMemoryOptions } from './memory.js';
+export type {
+  MemoryFact,
+  FactCategory,
+  AddFactInput,
+  ParaMemoryOptions,
+  MemoryFlushMode,
+} from './memory.js';
 export {
   timeOfDay,
   chebyshevDistance,
@@ -33,5 +39,7 @@ export type {
 } from './conversation.js';
 export { Runtime } from './runtime.js';
 export type { RuntimeOptions, RuntimeAgent, RuntimeEvent } from './runtime.js';
+export { TelemetryCollector } from './telemetry.js';
+export type { TelemetrySnapshot, TelemetryOptions } from './telemetry.js';
 export { seededRng, mulberry32, hashString, pick } from './rng.js';
 export type { Rng } from './rng.js';

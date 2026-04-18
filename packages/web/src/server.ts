@@ -85,7 +85,10 @@ async function main(): Promise<void> {
     const anchor = anchors[i % anchors.length]!;
     return {
       skill,
-      memory: new ParaMemory({ root: `${skillDirectory(skill)}/memory` }),
+      memory: new ParaMemory({
+        root: `${skillDirectory(skill)}/memory`,
+        flushMode: 'deferred',
+      }),
       initial: {
         position: {
           x: clamp(anchor.x + Math.floor(positionRng() * 5) - 2, 0, WORLD_W - 1),
@@ -147,9 +150,23 @@ async function main(): Promise<void> {
       return;
     }
     if (req.method === 'GET' && url.pathname === '/health') {
+      const t = runtime.telemetrySnapshot();
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
-        JSON.stringify({ ok: true, simTime: world.simTime, agents: world.listAgents().length }),
+        JSON.stringify({
+          ok: true,
+          simTime: world.simTime,
+          agents: world.listAgents().length,
+          ticks: t.ticks,
+          tickDurationMs: t.tickDuration,
+          activeConversations: t.activeConversations,
+          conversationsOpened: t.conversationsOpened,
+          conversationsClosed: t.conversationsClosed,
+          conversationsPerMinute: Math.round(t.conversationsPerMinute),
+          actionsPerMinute: Math.round(t.actionsPerMinute),
+          actions: t.actions,
+          wallMs: Math.round(t.wallMs),
+        }),
       );
       return;
     }
@@ -183,6 +200,7 @@ async function main(): Promise<void> {
   const shutdown = () => {
     clearInterval(tickTimer);
     for (const res of clients) res.end();
+    void runtime.flushConversations();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
   };

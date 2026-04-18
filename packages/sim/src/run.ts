@@ -201,7 +201,10 @@ async function main(): Promise<void> {
     };
     return {
       skill,
-      memory: new ParaMemory({ root: `${skillDirectory(skill)}/memory` }),
+      memory: new ParaMemory({
+        root: `${skillDirectory(skill)}/memory`,
+        flushMode: 'deferred',
+      }),
       initial: {
         position: {
           x: clamp(anchor.x + jitter.x, 0, opts.worldWidth - 1),
@@ -211,9 +214,7 @@ async function main(): Promise<void> {
     };
   });
 
-  const events: RuntimeEvent[] = [];
   const emit = (event: RuntimeEvent) => {
-    events.push(event);
     if (opts.json) {
       console.log(JSON.stringify(event));
       return;
@@ -243,19 +244,24 @@ async function main(): Promise<void> {
   await runtime.flushConversations();
 
   if (!opts.json) {
-    const actions = events.filter((e) => e.kind === 'action').length;
-    const speeches = events.filter((e) => e.kind === 'action' && e.action.kind === 'speak').length;
-    const moves = events.filter((e) => e.kind === 'action' && e.action.kind === 'move_to').length;
-    const gotos = events.filter((e) => e.kind === 'action' && e.action.kind === 'goto').length;
-    const remembers = events.filter(
-      (e) => e.kind === 'action' && e.action.kind === 'remember',
-    ).length;
-    const opens = events.filter((e) => e.kind === 'conversation_open').length;
-    const closes = events.filter((e) => e.kind === 'conversation_close').length;
+    const t = runtime.telemetrySnapshot();
+    const a = t.actions;
     console.log(
-      `[tina] done: ${opts.ticks} ticks, ${actions} actions (${moves} moves, ${gotos} gotos, ${speeches} speeches, ${remembers} remembered), ${opens} conversations opened, ${closes} closed`,
+      `[tina] done: ${t.ticks} ticks, ${sumActions(a)} actions (${a.move_to} moves, ${a.goto} gotos, ${a.speak} speeches, ${a.remember} remembered), ${t.conversationsOpened} conversations opened, ${t.conversationsClosed} closed`,
+    );
+    console.log(
+      `[tina] tick ms  mean=${t.tickDuration.mean.toFixed(2)} p50=${t.tickDuration.p50.toFixed(2)} p95=${t.tickDuration.p95.toFixed(2)} p99=${t.tickDuration.p99.toFixed(2)} max=${t.tickDuration.max.toFixed(2)}`,
+    );
+    console.log(
+      `[tina] wall=${t.wallMs.toFixed(0)}ms  actions/min=${t.actionsPerMinute.toFixed(0)}  conversations/min=${t.conversationsPerMinute.toFixed(0)}`,
     );
   }
+}
+
+function sumActions(r: Record<string, number>): number {
+  let s = 0;
+  for (const k of Object.keys(r)) s += r[k]!;
+  return s;
 }
 
 function clamp(n: number, lo: number, hi: number): number {

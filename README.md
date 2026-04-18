@@ -30,22 +30,30 @@ world/
 ```bash
 pnpm install
 pnpm hello          # one-agent hello-world tick loop
+pnpm gen-personas -- --count 100    # seed 100 procedural personas
 pnpm sim            # load every persona in world/agents and tick the runtime
 pnpm web            # live browser view at http://localhost:5173
+pnpm profile --agents 100 --ticks 120   # tick-loop profiler
 pnpm test           # vitest
 pnpm typecheck
 pnpm lint
 ```
 
 - `pnpm hello` advances 20 ticks and prints one agent's status each tick.
+- `pnpm gen-personas -- --count N [--seed N] [--prefix p] [--clean]` writes
+  N procedurally-distinct personas (agentskills.io compliant) into
+  `world/agents/`. Deterministic given a seed.
 - `pnpm sim [--ticks N] [--agents a,b,c] [--seed N] [--json]` loads every
   persona under `world/agents/` (agentskills.io format), wires a per-agent
-  `para-memory` tree, ticks the runtime, and prints an event log. Use
-  `--help` for the full flag list.
+  `para-memory` tree, ticks the runtime, and prints an event log plus a
+  telemetry summary (tick latency p50/p95/p99, actions/min, conversations/min).
 - `pnpm web` boots an HTTP server that runs the simulation in-process and
   streams snapshots + deltas over Server-Sent Events to a canvas client.
-  Config via env: `PORT`, `SIM_SPEED`, `TICK_MS`, `SEED`, `WORLD_W`,
-  `WORLD_H`.
+  `GET /health` returns live telemetry. Config via env: `PORT`, `SIM_SPEED`,
+  `TICK_MS`, `SEED`, `WORLD_W`, `WORLD_H`.
+- `pnpm profile --agents N --ticks T` synthesizes N stub personas in a tmpdir
+  and reports ms/tick percentiles — used to check that the runtime stays
+  within the tick budget as the agent count grows.
 
 ## Architecture
 
@@ -62,4 +70,4 @@ See the [TINA-2 plan document](./docs/architecture.md) — or open the issue in 
 - `TINA-3` — `agentskills.io` loader + per-agent memory + multi-agent runtime ✅
 - `TINA-4` — zones + goto + agent-to-agent conversations (with both-sided memory) ✅
 - `TINA-5` — pixelated renderer ✅
-- `TINA-6` — 100+ personas, telemetry, optimization
+- `TINA-6` — 100+ personas, telemetry, optimization ✅

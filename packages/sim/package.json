@@ -8,7 +8,9 @@
     "build": "tsc -b",
     "dev": "tsx watch src/hello.ts",
     "hello": "tsx src/hello.ts",
-    "sim": "tsx src/run.ts"
+    "sim": "tsx src/run.ts",
+    "gen-personas": "tsx scripts/generate-personas.ts",
+    "profile": "tsx scripts/profile.ts"
   },
   "dependencies": {
     "@tina/shared": "workspace:*",

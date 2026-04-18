@@ -13,6 +13,8 @@
     "dev": "pnpm --filter @tina/sim dev",
     "hello": "pnpm --filter @tina/sim hello",
     "sim": "pnpm --filter @tina/sim sim",
+    "gen-personas": "pnpm --filter @tina/sim gen-personas",
+    "profile": "pnpm --filter @tina/sim profile",
     "web": "pnpm --filter @tina/web web",
     "test": "vitest run",
     "test:watch": "vitest",
