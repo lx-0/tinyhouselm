@@ -7,9 +7,11 @@
   "scripts": {
     "build": "tsc -b",
     "dev": "tsx watch src/hello.ts",
-    "hello": "tsx src/hello.ts"
+    "hello": "tsx src/hello.ts",
+    "sim": "tsx src/run.ts"
   },
   "dependencies": {
-    "@tina/shared": "workspace:*"
+    "@tina/shared": "workspace:*",
+    "yaml": "^2.8.3"
   }
 }

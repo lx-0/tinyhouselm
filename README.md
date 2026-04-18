@@ -28,13 +28,18 @@ world/
 
 ```bash
 pnpm install
-pnpm hello          # run the hello-world tick loop
+pnpm hello          # one-agent hello-world tick loop
+pnpm sim            # load every persona in world/agents and tick the runtime
 pnpm test           # vitest
 pnpm typecheck
 pnpm lint
 ```
 
-Hello-world advances 20 ticks of simulated time, prints one agent's status each tick, and emits delta events (spawn, move, speech).
+- `pnpm hello` advances 20 ticks and prints one agent's status each tick.
+- `pnpm sim [--ticks N] [--agents a,b,c] [--seed N] [--json]` loads every
+  persona under `world/agents/` (agentskills.io format), wires a per-agent
+  `para-memory` tree, ticks the runtime, and prints an event log. Use
+  `--help` for the full flag list.
 
 ## Architecture
 
@@ -48,7 +53,7 @@ See the [TINA-2 plan document](./docs/architecture.md) — or open the issue in 
 ## Milestones
 
 - `TINA-2` — architecture + bootstrap + hello-world tick loop ✅
-- `TINA-3` — `agentskills.io` loader + per-agent memory + 50-tick multi-agent demo
-- `TINA-4` — perception + conversation (two agents meet and talk)
+- `TINA-3` — `agentskills.io` loader + per-agent memory + multi-agent runtime ✅
+- `TINA-4` — richer perception + agent-to-agent conversation + world model
 - `TINA-5` — pixelated renderer
 - `TINA-6` — 100+ personas, telemetry, optimization

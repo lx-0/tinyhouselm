@@ -7,3 +7,7 @@ dist
 .env.*
 !.env.example
 coverage
+
+# Per-agent para-memory runtime state
+world/agents/*/memory/*
+!world/agents/*/memory/.gitkeep
