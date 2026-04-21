@@ -26,6 +26,9 @@ const WORLD_H = Number(process.env.WORLD_H ?? 24);
 const SEED = Number(process.env.SEED ?? 42);
 const TICK_MS = Number(process.env.TICK_MS ?? 200);
 const SIM_SPEED = Number(process.env.SIM_SPEED ?? 30);
+// Starting wall-clock hour of day for the simulation (e.g. 6 = boot at 06:00).
+// Defaults to 6am so demos open on morning routines rather than midnight.
+const SIM_START_HOUR = Number(process.env.SIM_START_HOUR ?? 6);
 
 function defaultZones(width: number, height: number): Zone[] {
   const zw = Math.max(4, Math.floor(width / 4));
@@ -78,6 +81,7 @@ async function main(): Promise<void> {
     mode: 'stepped',
     speed: SIM_SPEED,
     tickHz: 1000 / TICK_MS,
+    startSimTime: SIM_START_HOUR * 3600,
   });
   const world = new World({ width: WORLD_W, height: WORLD_H, clock, zones });
 

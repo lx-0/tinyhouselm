@@ -1,4 +1,4 @@
-import type { Snapshot } from '@tina/shared';
+import { type Snapshot, deriveWorldClock } from '@tina/shared';
 import type { World } from '@tina/sim';
 
 export function buildSnapshot(world: World): Snapshot {
@@ -6,6 +6,7 @@ export function buildSnapshot(world: World): Snapshot {
     kind: 'snapshot',
     simTime: world.simTime,
     speed: world.clock.speed,
+    clock: deriveWorldClock(world.simTime, world.clock.speed),
     map: {
       width: world.width,
       height: world.height,

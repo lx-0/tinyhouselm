@@ -1,4 +1,14 @@
-import type { AgentSnap, Delta, Snapshot, StreamMessage, Vec2, Zone } from '@tina/shared';
+import {
+  type AgentSnap,
+  type DayPhase,
+  type Delta,
+  type Snapshot,
+  type StreamMessage,
+  type Vec2,
+  type WorldClock,
+  type Zone,
+  deriveWorldClock,
+} from '@tina/shared';
 
 const TILE = 24;
 
@@ -24,6 +34,7 @@ interface ViewState {
   conversations: Map<string, { participants: string[] }>;
   simTime: number;
   speed: number;
+  clock: WorldClock;
   connected: boolean;
   lastMessageAt: number;
 }
@@ -36,6 +47,7 @@ const state: ViewState = {
   conversations: new Map(),
   simTime: 0,
   speed: 1,
+  clock: deriveWorldClock(0, 1),
   connected: false,
   lastMessageAt: 0,
 };
@@ -104,6 +116,8 @@ function applySnapshot(snapshot: Snapshot): void {
   state.height = snapshot.map.height;
   state.zones = snapshot.map.zones;
   state.speed = snapshot.speed;
+  state.simTime = snapshot.simTime;
+  state.clock = snapshot.clock ?? deriveWorldClock(snapshot.simTime, snapshot.speed);
   state.agents.clear();
   state.conversations.clear();
   for (const a of snapshot.agents) upsertAgent(a);
@@ -116,6 +130,7 @@ function applyDelta(d: Delta): void {
   switch (d.kind) {
     case 'tick':
       state.simTime = d.simTime;
+      if (d.clock) state.clock = d.clock;
       return;
     case 'agent_spawn':
       upsertAgent(d.agent);
@@ -203,13 +218,56 @@ function roundRect(
   c.closePath();
 }
 
+function phasePalette(phase: DayPhase): { base: string; tint: string; tintAlpha: number } {
+  switch (phase) {
+    case 'dawn':
+      return { base: '#2c2442', tint: 'rgba(255, 180, 130, 0.15)', tintAlpha: 0.15 };
+    case 'day':
+      return { base: '#2c3559', tint: 'rgba(255, 255, 210, 0.0)', tintAlpha: 0 };
+    case 'dusk':
+      return { base: '#2a1f3c', tint: 'rgba(255, 120, 90, 0.22)', tintAlpha: 0.22 };
+    default:
+      return { base: '#0e0b24', tint: 'rgba(10, 15, 50, 0.45)', tintAlpha: 0.45 };
+  }
+}
+
+function hourFraction(clock: WorldClock): number {
+  return clock.hour + clock.minute / 60;
+}
+
+/** Interpolate a phase tint from the current fractional hour so transitions are smooth. */
+function currentPhaseTint(clock: WorldClock): { base: string; tint: string; tintAlpha: number } {
+  const h = hourFraction(clock);
+  const phases: Array<{ start: number; palette: ReturnType<typeof phasePalette> }> = [
+    { start: 0, palette: phasePalette('night') },
+    { start: 5, palette: phasePalette('dawn') },
+    { start: 7, palette: phasePalette('day') },
+    { start: 19, palette: phasePalette('dusk') },
+    { start: 21, palette: phasePalette('night') },
+  ];
+  let lo = phases[phases.length - 1]!;
+  let hi = phases[0]!;
+  for (let i = 0; i < phases.length - 1; i++) {
+    if (h >= phases[i]!.start && h < phases[i + 1]!.start) {
+      lo = phases[i]!;
+      hi = phases[i + 1]!;
+      break;
+    }
+  }
+  const span = (hi.start - lo.start + 24) % 24 || 24;
+  const t = Math.min(1, Math.max(0, ((h - lo.start + 24) % 24) / span));
+  const alpha = lo.palette.tintAlpha + (hi.palette.tintAlpha - lo.palette.tintAlpha) * t;
+  return { base: lo.palette.base, tint: lo.palette.tint, tintAlpha: alpha };
+}
+
 function draw(): void {
   if (!ctx || state.width === 0) {
     requestAnimationFrame(draw);
     return;
   }
 
-  ctx.fillStyle = '#181530';
+  const palette = currentPhaseTint(state.clock);
+  ctx.fillStyle = palette.base;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
@@ -321,10 +379,26 @@ function draw(): void {
     }
   }
 
+  // Day/night tint overlay on top of the world
+  if (palette.tintAlpha > 0) {
+    ctx.fillStyle = palette.tint;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
   const convCount = state.conversations.size;
-  statsEl.textContent = `${state.connected ? 'live' : 'offline'}  ·  sim ${state.simTime.toFixed(1)}s  ·  ${state.agents.size} agents  ·  ${convCount} conversation${convCount === 1 ? '' : 's'}  ·  ${state.speed}× speed`;
+  const clockStr = formatClock(state.clock);
+  statsEl.textContent = `${state.connected ? 'live' : 'offline'}  ·  ${clockStr}  ·  ${state.agents.size} agents  ·  ${convCount} conversation${convCount === 1 ? '' : 's'}  ·  ${state.speed}× speed`;
 
   requestAnimationFrame(draw);
+}
+
+const WEEKDAY_NAMES = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+
+function formatClock(clock: WorldClock): string {
+  const hh = String(clock.hour).padStart(2, '0');
+  const mm = String(clock.minute).padStart(2, '0');
+  const weekday = WEEKDAY_NAMES[clock.dayOfWeek] ?? '';
+  return `day ${clock.day} · ${weekday} ${hh}:${mm} · ${clock.phase}`;
 }
 
 function connect(): void {

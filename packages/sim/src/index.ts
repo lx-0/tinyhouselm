@@ -38,6 +38,7 @@ export {
   replanForSurprise,
   simDay,
   simHour,
+  inferPersonaSchedule,
 } from './plan.js';
 export type {
   DayPlan,
@@ -47,6 +48,8 @@ export type {
   ReplanEntry,
   ReplanOutcome,
   GeneratePlanInput,
+  PersonaSchedule,
+  WeekendMode,
 } from './plan.js';
 export { ConversationRegistry } from './conversation.js';
 export type {

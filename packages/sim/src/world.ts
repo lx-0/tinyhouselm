@@ -1,4 +1,4 @@
-import type { Delta, SimTime, Vec2, Zone } from '@tina/shared';
+import { type Delta, type SimTime, type Vec2, type Zone, deriveWorldClock } from '@tina/shared';
 import type { Agent } from './agent.js';
 import { SimulationClock } from './clock.js';
 
@@ -40,7 +40,12 @@ export class World {
 
   tick(realMs: number): Delta[] {
     this.clock.advance(realMs);
-    this.deltas.push({ kind: 'tick', simTime: this.clock.simTime });
+    const simTime = this.clock.simTime;
+    this.deltas.push({
+      kind: 'tick',
+      simTime,
+      clock: deriveWorldClock(simTime, this.clock.speed),
+    });
     const flushed = this.deltas;
     this.deltas = [];
     return flushed;

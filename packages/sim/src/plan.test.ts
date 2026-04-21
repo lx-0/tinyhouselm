@@ -8,6 +8,7 @@ import {
   PlanRuntime,
   activeBlock,
   generateDayPlan,
+  inferPersonaSchedule,
   replanForSurprise,
   simDay,
   simHour,
@@ -160,5 +161,49 @@ describe('plan', () => {
     expect(planner.resume('a')).toBe(true);
     expect(planner.suspension('a')).toBeNull();
     expect(planner.resume('a')).toBe(false);
+  });
+
+  it('inferPersonaSchedule detects night owls, early birds, and occupations', () => {
+    const owl = skillFor('owl', 'night owl who paints until 2am, introvert barista');
+    const bird = skillFor(
+      'bird',
+      'street musician who opens the café at 06:30 on weekdays, outgoing, energetic',
+    );
+    const nurse = skillFor('nurse', 'quiet school nurse, remote-ish, balanced');
+
+    const s1 = inferPersonaSchedule(owl);
+    expect(s1.wakeHour).toBeGreaterThanOrEqual(9);
+    expect(s1.sleepHour).toBeGreaterThanOrEqual(24);
+    expect(s1.workZone).toBe('cafe');
+
+    const s2 = inferPersonaSchedule(bird);
+    expect(s2.wakeHour).toBeLessThanOrEqual(6);
+    expect(s2.workZone).toBe('cafe');
+    expect(s2.workStart).toBeLessThanOrEqual(7);
+
+    const s3 = inferPersonaSchedule(nurse);
+    expect(s3.workZone).toBe('home');
+  });
+
+  it('generateDayPlan applies weekend mode — morning rests and afternoon socializes', () => {
+    const persona = skillFor('alpha', 'extrovert, energetic, social, barista');
+    // day 5 is a saturday under our mon=0 convention
+    const weekend = generateDayPlan({ persona, zones, day: 5, simTime: 5 * 86400 });
+    const morning = weekend.blocks.find((b) => b.id === 'morning')!;
+    const afternoon = weekend.blocks.find((b) => b.id === 'afternoon')!;
+    expect(morning.activity).toBe('rest');
+    expect(afternoon.activity).toBe('socialize');
+    expect(weekend.summary).toContain('sat');
+  });
+
+  it('night-owl blocks cover the wrap-around sleep range', () => {
+    const owl = skillFor('owl', 'night owl who paints until 2am');
+    const plan = generateDayPlan({ persona: owl, zones, day: 0, simTime: 0 });
+    const night = plan.blocks.find((b) => b.id === 'night')!;
+    const morning = plan.blocks.find((b) => b.id === 'morning')!;
+    expect(night.startHour).toBeGreaterThanOrEqual(24);
+    expect(morning.startHour).toBeGreaterThanOrEqual(9);
+    // Early morning hours before the wake time fall back to the last block (night).
+    expect(activeBlock(plan, 3)?.id).toBe('night');
   });
 });
