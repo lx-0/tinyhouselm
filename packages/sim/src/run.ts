@@ -167,6 +167,12 @@ function formatEvent(event: RuntimeEvent): string {
       return `t=${t}  tick=${tick}  conv_open  ${event.sessionId}  [${event.participants.join(', ')}]`;
     case 'conversation_close':
       return `t=${t}  tick=${tick}  conv_close ${event.sessionId}  [${event.participants.join(', ')}]  turns=${event.transcript.length}  reason=${event.reason}`;
+    case 'plan_committed':
+      return `t=${t}  tick=${tick}  plan_commit  ${event.agentId.padEnd(16)}  day=${event.day}  ${event.summary}`;
+    case 'plan_replan':
+      return `t=${t}  tick=${tick}  plan_replan  ${event.agentId.padEnd(16)}  reason=${event.reason}  ${event.detail}`;
+    case 'plan_resume':
+      return `t=${t}  tick=${tick}  plan_resume  ${event.agentId.padEnd(16)}  reason=${event.reason}`;
   }
 }
 

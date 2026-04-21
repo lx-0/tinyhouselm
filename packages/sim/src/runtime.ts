@@ -12,6 +12,7 @@ import {
   stepToward,
   timeOfDay,
 } from './perception.js';
+import { type DayPlan, PlanRuntime } from './plan.js';
 import type { SkillDocument } from './skills.js';
 import { TelemetryCollector, type TelemetrySnapshot } from './telemetry.js';
 import { World } from './world.js';
@@ -68,6 +69,29 @@ export type RuntimeEvent =
       participants: string[];
       transcript: ConversationTurn[];
       reason: 'drifted' | 'idle';
+    }
+  | {
+      kind: 'plan_committed';
+      tick: number;
+      simTime: SimTime;
+      agentId: string;
+      summary: string;
+      day: number;
+    }
+  | {
+      kind: 'plan_replan';
+      tick: number;
+      simTime: SimTime;
+      agentId: string;
+      reason: string;
+      detail: string;
+    }
+  | {
+      kind: 'plan_resume';
+      tick: number;
+      simTime: SimTime;
+      agentId: string;
+      reason: string;
     };
 
 interface Recent {
@@ -97,6 +121,7 @@ export class Runtime {
   private readonly conversations: ConversationRegistry;
   private readonly memoryFlushEveryTicks: number;
   readonly telemetry: TelemetryCollector;
+  readonly planRuntime: PlanRuntime;
   private tickIndex = 0;
   private flushInFlight: Promise<void> | null = null;
 
@@ -123,6 +148,7 @@ export class Runtime {
       speechRadius: this.speechRadius,
       idleTtlSim: (conversationIdleMs / 1000) * this.clock.speed,
     });
+    this.planRuntime = new PlanRuntime();
 
     for (const entry of opts.agents) {
       this.spawn(entry);
@@ -173,12 +199,37 @@ export class Runtime {
       const perception = this.buildPerception(agent, tick);
       const memory = this.memories.get(agent.def.id)!;
       const skill = this.skills.get(agent.def.id)!;
+
+      const { plan, committed } = await this.planRuntime.ensurePlan({
+        agentId: agent.def.id,
+        persona: skill,
+        zones: this.world.zones,
+        memory,
+        simTime,
+      });
+
+      if (committed) {
+        this.emit({
+          kind: 'plan_committed',
+          tick,
+          simTime,
+          agentId: agent.def.id,
+          summary: plan.summary,
+          day: plan.day,
+        });
+        await memory.appendDailyNote(`wake: committed to ${plan.summary}`);
+      }
+
+      const suspended = await this.handleSurprises(agent, perception, plan, tick, simTime);
+
       const rng = makeRngForAgent(agent.def.id, this.seed, tick);
       const actions = await this.policy.decide({
         persona: skill,
         perception,
         memory,
         rng,
+        plan,
+        suspended,
       });
 
       for (const action of actions) {
@@ -243,6 +294,67 @@ export class Runtime {
       await this.handleConversationClose(session, reason, tick, simTime);
     }
     await this.flushMemories();
+  }
+
+  private async handleSurprises(
+    agent: Agent,
+    perception: Perception,
+    plan: DayPlan,
+    tick: number,
+    simTime: SimTime,
+  ): Promise<string | null> {
+    const memory = this.memories.get(agent.def.id)!;
+    const existing = this.planRuntime.suspension(agent.def.id);
+
+    const heardNearby = perception.recentSpeech.find((s) =>
+      perception.nearby.some((n) => n.id === s.speakerId),
+    );
+
+    if (!existing && heardNearby) {
+      const detail = `heard ${heardNearby.speakerName}: "${heardNearby.text}"`;
+      this.planRuntime.suspend(agent.def.id, 'conversation');
+      await this.planRuntime.recordReplan({
+        agentId: agent.def.id,
+        memory,
+        simTime,
+        reason: 'conversation',
+        detail,
+      });
+      this.emit({
+        kind: 'plan_replan',
+        tick,
+        simTime,
+        agentId: agent.def.id,
+        reason: 'conversation',
+        detail,
+      });
+      await memory.appendDailyNote(`t=${simTime.toFixed(1)}s replan: ${detail}`);
+      // Hold position — drop any goto so the agent stays to converse.
+      agent.state.gotoTarget = null;
+      agent.state.gotoLabel = null;
+      return 'conversation';
+    }
+
+    if (existing === 'conversation') {
+      const stillEngaged = perception.nearby.length > 0 || perception.recentSpeech.length > 0;
+      if (!stillEngaged) {
+        this.planRuntime.resume(agent.def.id);
+        this.emit({
+          kind: 'plan_resume',
+          tick,
+          simTime,
+          agentId: agent.def.id,
+          reason: 'conversation_ended',
+        });
+        await memory.appendDailyNote(
+          `t=${simTime.toFixed(1)}s resume: back to plan — ${plan.summary.slice(0, 80)}`,
+        );
+        return null;
+      }
+      return existing;
+    }
+
+    return existing;
   }
 
   private async stepGoto(agent: Agent, tick: number, simTime: SimTime): Promise<void> {
@@ -321,7 +433,7 @@ export class Runtime {
           speakerName: agent.def.name,
           text: action.text,
           at: simTime,
-          expireAt: simTime + this.speechTtlMs / 1000,
+          expireAt: simTime + (this.speechTtlMs / 1000) * this.clock.speed,
         });
         this.world.emit({
           kind: 'speech',

@@ -1,6 +1,8 @@
 import type { AgentAction, Vec2 } from '@tina/shared';
 import type { ParaMemory } from './memory.js';
 import type { Perception } from './perception.js';
+import type { DayPlan, PlanBlock } from './plan.js';
+import { activeBlock, simHour } from './plan.js';
 import { type Rng, pick, seededRng } from './rng.js';
 import type { SkillDocument } from './skills.js';
 
@@ -9,6 +11,8 @@ export interface HeartbeatContext {
   perception: Perception;
   memory: ParaMemory;
   rng: Rng;
+  plan?: DayPlan | null;
+  suspended?: string | null;
 }
 
 export interface HeartbeatPolicy {
@@ -59,28 +63,60 @@ export function inferPersonaHints(persona: SkillDocument): PersonaHints {
  */
 export class DefaultHeartbeatPolicy implements HeartbeatPolicy {
   async decide(ctx: HeartbeatContext): Promise<AgentAction[]> {
-    const { persona, perception, rng } = ctx;
+    const { persona, perception, rng, plan, suspended } = ctx;
     const hints = inferPersonaHints(persona);
     const actions: AgentAction[] = [];
     const hasGoto = !!perception.self.gotoTarget;
 
     if (perception.tick === 0) {
-      actions.push({
-        kind: 'set_goal',
-        goal: persona.description || 'exist in the world',
-      });
+      const goalText = plan
+        ? plan.summary.slice(0, 80)
+        : persona.description || 'exist in the world';
+      actions.push({ kind: 'set_goal', goal: goalText });
+    }
+
+    // Suspension takes over — the agent is engaged in something that
+    // overrides the plan for this tick (e.g. mid-conversation).
+    if (suspended === 'conversation') {
+      const heardFromNearby = perception.recentSpeech.find((s) =>
+        perception.nearby.some((n) => n.id === s.speakerId),
+      );
+      if (heardFromNearby) {
+        const text = pick(rng, hints.replies) ?? 'mhm.';
+        actions.push({ kind: 'speak', to: heardFromNearby.speakerId, text });
+      } else if (perception.nearby.length > 0) {
+        const text = pick(rng, hints.replies) ?? 'yeah.';
+        actions.push({ kind: 'speak', to: perception.nearby[0]!.id, text });
+      } else {
+        actions.push({ kind: 'wait', seconds: 1 });
+      }
+      return actions;
+    }
+
+    const block = plan ? activeBlock(plan, simHour(perception.simTime)) : null;
+
+    if (block && !hasGoto) {
+      const zoneTarget = planZoneTarget(block, perception);
+      if (zoneTarget && perception.self.zone !== block.preferredZone) {
+        actions.push({ kind: 'goto', target: zoneTarget.target, label: zoneTarget.label });
+        if (perception.tick === 0) {
+          actions.push({ kind: 'remember', fact: `committed: ${block.intent}` });
+        }
+        return actions;
+      }
     }
 
     const heardFromNearby = perception.recentSpeech.find((s) =>
       perception.nearby.some((n) => n.id === s.speakerId),
     );
+    const speakingBias = block?.activity === 'socialize' ? 0.25 : 0;
     if (heardFromNearby) {
       if (rng() < hints.talkativeness + 0.3) {
         const text = pick(rng, hints.replies) ?? 'mhm.';
         actions.push({ kind: 'speak', to: heardFromNearby.speakerId, text });
       }
     } else if (perception.nearby.length > 0) {
-      if (rng() < hints.talkativeness) {
+      if (rng() < hints.talkativeness + speakingBias) {
         const text = pick(rng, hints.greetings) ?? 'hey.';
         actions.push({ kind: 'speak', to: perception.nearby[0]!.id, text });
       }
@@ -89,7 +125,13 @@ export class DefaultHeartbeatPolicy implements HeartbeatPolicy {
       actions.push({ kind: 'speak', to: null, text });
     }
 
-    if (!hasGoto && perception.nearby.length === 0 && perception.zones.length > 0) {
+    // Plan-shaped in-zone behavior when the agent has arrived.
+    if (block && !hasGoto && block.preferredZone && perception.self.zone === block.preferredZone) {
+      const activityAction = inZoneAction(block, perception, rng);
+      if (activityAction) actions.push(activityAction);
+    }
+
+    if (!hasGoto && !block && perception.nearby.length === 0 && perception.zones.length > 0) {
       if (rng() < hints.restlessness * 0.5) {
         const zone = pick(rng, perception.zones);
         if (zone) {
@@ -100,13 +142,14 @@ export class DefaultHeartbeatPolicy implements HeartbeatPolicy {
       }
     }
 
-    if (!hasGoto && rng() < hints.restlessness) {
+    const wanderAllowed = !block || block.activity === 'wander' || block.preferredZone === null;
+    if (!hasGoto && wanderAllowed && rng() < hints.restlessness) {
       const next = wanderStep(perception.self.position, perception, rng);
       if (next) actions.push({ kind: 'move_to', to: next });
     }
 
     if (rng() < 0.08) {
-      const note = observationNote(perception);
+      const note = observationNote(perception, block);
       if (note) actions.push({ kind: 'remember', fact: note });
     }
 
@@ -159,14 +202,58 @@ function wanderStep(from: Vec2, perception: Perception, rng: Rng): Vec2 | null {
   return next;
 }
 
-function observationNote(perception: Perception): string | null {
+function observationNote(perception: Perception, block: PlanBlock | null): string | null {
+  const intent = block ? ` [${block.intent}]` : '';
   if (perception.nearby.length > 0) {
     const names = perception.nearby.map((n) => n.name).join(', ');
-    return `${perception.timeOfDay}: shared space with ${names}`;
+    return `${perception.timeOfDay}${intent}: shared space with ${names}`;
   }
   if (perception.recentSpeech.length > 0) {
     const last = perception.recentSpeech[perception.recentSpeech.length - 1]!;
-    return `${perception.timeOfDay}: overheard ${last.speakerName} say "${last.text}"`;
+    return `${perception.timeOfDay}${intent}: overheard ${last.speakerName} say "${last.text}"`;
   }
   return null;
+}
+
+function planZoneTarget(
+  block: PlanBlock,
+  perception: Perception,
+): { target: Vec2; label: string } | null {
+  if (!block.preferredZone) return null;
+  const zone = perception.zones.find((z) => z.name === block.preferredZone);
+  if (!zone) return null;
+  return {
+    target: {
+      x: Math.floor(zone.x + zone.width / 2),
+      y: Math.floor(zone.y + zone.height / 2),
+    },
+    label: zone.name,
+  };
+}
+
+function inZoneAction(block: PlanBlock, perception: Perception, rng: Rng): AgentAction | null {
+  switch (block.activity) {
+    case 'work':
+      if (rng() < 0.2) {
+        return {
+          kind: 'remember',
+          fact: `focused on work at ${block.preferredZone ?? 'the desk'}`,
+        };
+      }
+      return { kind: 'wait', seconds: 2 };
+    case 'rest':
+      return { kind: 'wait', seconds: 2 };
+    case 'eat':
+      if (rng() < 0.25) {
+        return { kind: 'remember', fact: `ate at ${block.preferredZone ?? 'the spot'}` };
+      }
+      return { kind: 'wait', seconds: 1 };
+    case 'socialize':
+      if (perception.nearby.length === 0 && rng() < 0.3) {
+        return { kind: 'wait', seconds: 1 };
+      }
+      return null;
+    case 'wander':
+      return null;
+  }
 }
