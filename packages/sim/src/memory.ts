@@ -70,6 +70,10 @@ export class ParaMemory {
     return join(this.root, 'memory', `${date}.md`);
   }
 
+  private planPath(day: number): string {
+    return join(this.root, 'life', 'areas', this.entity, 'plans', `day-${day}.yaml`);
+  }
+
   private today(): string {
     return this.now().toISOString().slice(0, 10);
   }
@@ -184,6 +188,17 @@ export class ParaMemory {
     for (const line of lines) {
       await this.addFact({ fact: line, category: 'preference' });
     }
+  }
+
+  async readPlanRaw(day: number): Promise<unknown | null> {
+    const raw = await readFileOrEmpty(this.planPath(day));
+    if (!raw) return null;
+    return parseYaml(raw);
+  }
+
+  async writePlanRaw(day: number, plan: unknown): Promise<void> {
+    await ensureDir(dirname(this.planPath(day)));
+    await writeFile(this.planPath(day), stringifyYaml(plan), 'utf8');
   }
 
   /** Persist any buffered writes. Safe to call repeatedly; no-op when clean. */

@@ -30,6 +30,24 @@ export {
 export type { Perception, TimeOfDay, HeardSpeech } from './perception.js';
 export { DefaultHeartbeatPolicy, inferPersonaHints, makeRngForAgent } from './heartbeat.js';
 export type { HeartbeatPolicy, HeartbeatContext, PersonaHints } from './heartbeat.js';
+export {
+  PlanRuntime,
+  generateDayPlan,
+  expandBlock,
+  activeBlock,
+  replanForSurprise,
+  simDay,
+  simHour,
+} from './plan.js';
+export type {
+  DayPlan,
+  PlanBlock,
+  HourPlan,
+  PlanActivity,
+  ReplanEntry,
+  ReplanOutcome,
+  GeneratePlanInput,
+} from './plan.js';
 export { ConversationRegistry } from './conversation.js';
 export type {
   ConversationSession,
