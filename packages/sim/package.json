@@ -10,7 +10,8 @@
     "hello": "tsx src/hello.ts",
     "sim": "tsx src/run.ts",
     "gen-personas": "tsx scripts/generate-personas.ts",
-    "profile": "tsx scripts/profile.ts"
+    "profile": "tsx scripts/profile.ts",
+    "plan-demo": "tsx scripts/plan-demo.ts"
   },
   "dependencies": {
     "@tina/shared": "workspace:*",

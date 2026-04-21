@@ -15,6 +15,7 @@
     "sim": "pnpm --filter @tina/sim sim",
     "gen-personas": "pnpm --filter @tina/sim gen-personas",
     "profile": "pnpm --filter @tina/sim profile",
+    "plan-demo": "pnpm --filter @tina/sim plan-demo",
     "web": "pnpm --filter @tina/web web",
     "test": "vitest run",
     "test:watch": "vitest",
