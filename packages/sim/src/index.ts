@@ -12,14 +12,22 @@ export {
   skillSlugFromPath,
 } from './skills.js';
 export type { SkillDocument, SkillFrontmatter } from './skills.js';
-export { ParaMemory } from './memory.js';
+export { ParaMemory, DEFAULT_IMPORTANCE } from './memory.js';
 export type {
   MemoryFact,
   FactCategory,
   AddFactInput,
   ParaMemoryOptions,
   MemoryFlushMode,
+  RecallOptions,
+  RecalledFact,
 } from './memory.js';
+export { ReflectionEngine } from './reflection.js';
+export type {
+  ReflectionEngineOptions,
+  ReflectionTrigger,
+  ReflectionResult,
+} from './reflection.js';
 export {
   timeOfDay,
   chebyshevDistance,

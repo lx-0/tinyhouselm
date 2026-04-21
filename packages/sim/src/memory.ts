@@ -2,12 +2,28 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
-export type FactCategory = 'relationship' | 'milestone' | 'status' | 'preference' | 'observation';
+export type FactCategory =
+  | 'relationship'
+  | 'milestone'
+  | 'status'
+  | 'preference'
+  | 'observation'
+  | 'reflection';
+
+export const DEFAULT_IMPORTANCE: Record<FactCategory, number> = {
+  reflection: 7,
+  milestone: 8,
+  relationship: 6,
+  preference: 5,
+  status: 4,
+  observation: 3,
+};
 
 export interface MemoryFact {
   id: string;
   fact: string;
   category: FactCategory;
+  importance: number;
   timestamp: string;
   source: string;
   status: 'active' | 'superseded';
@@ -15,6 +31,8 @@ export interface MemoryFact {
   related_entities: string[];
   last_accessed: string;
   access_count: number;
+  /** Source fact ids the reflection was synthesized from. Empty for raw facts. */
+  derived_from?: string[];
 }
 
 export interface AddFactInput {
@@ -22,6 +40,29 @@ export interface AddFactInput {
   category?: FactCategory;
   related_entities?: string[];
   source?: string;
+  importance?: number;
+  derived_from?: string[];
+}
+
+export interface RecallOptions {
+  /** Optional free-text query. Lowercased and tokenized for relevance scoring. */
+  query?: string;
+  /** Optional related entity ids that boost relevance when they overlap. */
+  relatedTo?: string[];
+  /** Max number of facts to return. */
+  limit: number;
+  /** Reference time used for recency decay. Defaults to memory.now(). */
+  now?: Date;
+  /** Decay half-life in seconds for the recency factor. Default 6 hours of wall time. */
+  recencyHalfLifeSec?: number;
+}
+
+export interface RecalledFact {
+  fact: MemoryFact;
+  score: number;
+  recency: number;
+  importance: number;
+  relevance: number;
 }
 
 export type MemoryFlushMode = 'eager' | 'deferred';
@@ -86,7 +127,14 @@ export class ParaMemory {
       return this.facts;
     }
     const parsed = parseYaml(raw);
-    this.facts = Array.isArray(parsed) ? (parsed as MemoryFact[]) : [];
+    const list = Array.isArray(parsed) ? (parsed as MemoryFact[]) : [];
+    // Backfill importance for facts written before the field existed.
+    for (const f of list) {
+      if (typeof f.importance !== 'number') {
+        f.importance = DEFAULT_IMPORTANCE[f.category] ?? 3;
+      }
+    }
+    this.facts = list;
     return this.facts;
   }
 
@@ -128,10 +176,12 @@ export class ParaMemory {
     const facts = await this.loadFacts();
     const date = this.today();
     const id = `${this.entity}-${facts.length + 1}`;
+    const category = input.category ?? 'observation';
     const fact: MemoryFact = {
       id,
       fact: input.fact,
-      category: input.category ?? 'observation',
+      category,
+      importance: clampImportance(input.importance ?? DEFAULT_IMPORTANCE[category]),
       timestamp: date,
       source: input.source ?? date,
       status: 'active',
@@ -139,6 +189,9 @@ export class ParaMemory {
       related_entities: input.related_entities ?? [],
       last_accessed: date,
       access_count: 0,
+      ...(input.derived_from && input.derived_from.length > 0
+        ? { derived_from: input.derived_from }
+        : {}),
     };
     facts.push(fact);
     this.factsDirty = true;
@@ -149,6 +202,36 @@ export class ParaMemory {
   async recentActiveFacts(limit: number): Promise<MemoryFact[]> {
     const facts = await this.loadFacts();
     return facts.filter((f) => f.status === 'active').slice(-limit);
+  }
+
+  async recentReflections(limit: number): Promise<MemoryFact[]> {
+    const facts = await this.loadFacts();
+    return facts.filter((f) => f.status === 'active' && f.category === 'reflection').slice(-limit);
+  }
+
+  /**
+   * Park et al.-style retrieval: rank active facts by recency × importance × relevance.
+   * Reflections naturally outrank raw observations because they carry higher
+   * default importance, so a long-lived agent can read top-K instead of dumping
+   * its whole memory into the prompt.
+   */
+  async recallForDecision(opts: RecallOptions): Promise<RecalledFact[]> {
+    const facts = await this.loadFacts();
+    const active = facts.filter((f) => f.status === 'active');
+    if (active.length === 0) return [];
+    const now = (opts.now ?? this.now()).getTime();
+    const halfLife = (opts.recencyHalfLifeSec ?? 6 * 3600) * 1000;
+    const queryTokens = tokenize(opts.query ?? '');
+    const relatedSet = new Set(opts.relatedTo ?? []);
+    const scored = active.map((fact) => {
+      const recency = recencyScore(fact, now, halfLife);
+      const importance = fact.importance / 10;
+      const relevance = relevanceScore(fact, queryTokens, relatedSet);
+      const score = recency * 0.4 + importance * 0.4 + relevance * 0.2;
+      return { fact, score, recency, importance, relevance };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, opts.limit);
   }
 
   async supersede(factId: string, replacement: MemoryFact): Promise<void> {
@@ -208,6 +291,42 @@ export class ParaMemory {
     for (const day of this.dailyDirty) pending.push(this.writeDailyNow(day));
     if (pending.length > 0) await Promise.all(pending);
   }
+}
+
+function clampImportance(n: number): number {
+  if (Number.isNaN(n)) return 3;
+  return Math.min(10, Math.max(1, Math.round(n)));
+}
+
+function tokenize(s: string): string[] {
+  if (!s) return [];
+  return s
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length > 2);
+}
+
+function recencyScore(fact: MemoryFact, nowMs: number, halfLifeMs: number): number {
+  const ts = Date.parse(fact.timestamp);
+  if (Number.isNaN(ts)) return 0.1;
+  const ageMs = Math.max(0, nowMs - ts);
+  // Exponential decay: score halves every halfLifeMs.
+  return 2 ** (-ageMs / halfLifeMs);
+}
+
+function relevanceScore(fact: MemoryFact, queryTokens: string[], relatedSet: Set<string>): number {
+  if (queryTokens.length === 0 && relatedSet.size === 0) return 0.5;
+  let score = 0;
+  if (relatedSet.size > 0) {
+    const overlap = fact.related_entities.filter((e) => relatedSet.has(e)).length;
+    if (overlap > 0) score += Math.min(1, overlap / relatedSet.size);
+  }
+  if (queryTokens.length > 0) {
+    const factTokens = new Set(tokenize(fact.fact));
+    const hits = queryTokens.filter((t) => factTokens.has(t)).length;
+    if (hits > 0) score += Math.min(1, hits / queryTokens.length);
+  }
+  return Math.min(1, score);
 }
 
 async function readFileOrEmpty(path: string): Promise<string | null> {

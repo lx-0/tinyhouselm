@@ -15,6 +15,8 @@ export interface TelemetrySnapshot {
   /** conversations opened / closed over the whole run */
   conversationsOpened: number;
   conversationsClosed: number;
+  /** reflections written across all agents over the whole run */
+  reflectionsWritten: number;
   /** number of sessions currently open (set externally by the runtime) */
   activeConversations: number;
   /** per-tick wall duration samples, in ms, most recent last, capped */
@@ -61,6 +63,7 @@ export class TelemetryCollector {
   private actions: Record<AgentAction['kind'], number> = { ...EMPTY_ACTIONS };
   private opened = 0;
   private closed = 0;
+  private reflections = 0;
   private activeConversations = 0;
   private durations: number[] = [];
 
@@ -88,6 +91,9 @@ export class TelemetryCollector {
       case 'spawn':
         this.agents += 1;
         return;
+      case 'reflection_written':
+        this.reflections += 1;
+        return;
     }
   }
 
@@ -113,6 +119,7 @@ export class TelemetryCollector {
       actions: { ...this.actions },
       conversationsOpened: this.opened,
       conversationsClosed: this.closed,
+      reflectionsWritten: this.reflections,
       activeConversations: this.activeConversations,
       tickDurationSamples: samples,
       tickDuration: {

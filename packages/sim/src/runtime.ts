@@ -4,7 +4,7 @@ import { SimulationClock } from './clock.js';
 import { ConversationRegistry, type ConversationSession } from './conversation.js';
 import type { HeartbeatPolicy } from './heartbeat.js';
 import { DefaultHeartbeatPolicy, makeRngForAgent } from './heartbeat.js';
-import type { ParaMemory } from './memory.js';
+import type { MemoryFact, ParaMemory } from './memory.js';
 import {
   type Perception,
   chebyshevDistance,
@@ -13,6 +13,7 @@ import {
   timeOfDay,
 } from './perception.js';
 import { type DayPlan, PlanRuntime } from './plan.js';
+import { ReflectionEngine, type ReflectionEngineOptions } from './reflection.js';
 import type { SkillDocument } from './skills.js';
 import { TelemetryCollector, type TelemetrySnapshot } from './telemetry.js';
 import { World } from './world.js';
@@ -41,6 +42,16 @@ export interface RuntimeOptions {
    */
   memoryFlushEveryTicks?: number;
   telemetry?: TelemetryCollector;
+  /**
+   * Per-agent reflection engine config. Set to `false` to disable consolidation
+   * entirely (useful for tiny test sims).
+   */
+  reflections?: ReflectionEngineOptions | false;
+  /**
+   * Cap on how many facts the runtime injects into Perception.recentFacts each
+   * tick. Default 5 — keeps the seam small for an LLM-backed policy later.
+   */
+  recallLimit?: number;
 }
 
 export type RuntimeEvent =
@@ -92,6 +103,16 @@ export type RuntimeEvent =
       simTime: SimTime;
       agentId: string;
       reason: string;
+    }
+  | {
+      kind: 'reflection_written';
+      tick: number;
+      simTime: SimTime;
+      agentId: string;
+      trigger: 'day_rollover' | 'importance_budget' | 'manual';
+      reflectionId: string;
+      summary: string;
+      sourceCount: number;
     };
 
 interface Recent {
@@ -122,6 +143,10 @@ export class Runtime {
   private readonly memoryFlushEveryTicks: number;
   readonly telemetry: TelemetryCollector;
   readonly planRuntime: PlanRuntime;
+  private readonly reflectionEngines = new Map<string, ReflectionEngine>();
+  private readonly reflectionsEnabled: boolean;
+  private readonly reflectionOpts: ReflectionEngineOptions;
+  private readonly recallLimit: number;
   private tickIndex = 0;
   private flushInFlight: Promise<void> | null = null;
 
@@ -136,6 +161,9 @@ export class Runtime {
     this.onEvent = opts.onEvent;
     this.memoryFlushEveryTicks = opts.memoryFlushEveryTicks ?? 10;
     this.telemetry = opts.telemetry ?? new TelemetryCollector();
+    this.reflectionsEnabled = opts.reflections !== false;
+    this.reflectionOpts = opts.reflections ? opts.reflections : {};
+    this.recallLimit = opts.recallLimit ?? 5;
     this.world =
       opts.world ??
       new World({
@@ -169,6 +197,9 @@ export class Runtime {
     this.agents.push(agent);
     this.memories.set(agent.def.id, entry.memory);
     this.skills.set(agent.def.id, entry.skill);
+    if (this.reflectionsEnabled) {
+      this.reflectionEngines.set(agent.def.id, new ReflectionEngine(this.reflectionOpts));
+    }
     this.world.addAgent(agent);
     this.emit({ kind: 'spawn', agentId: agent.def.id, name: agent.def.name });
     return agent;
@@ -196,9 +227,10 @@ export class Runtime {
     }
 
     for (const agent of this.agents) {
-      const perception = this.buildPerception(agent, tick);
       const memory = this.memories.get(agent.def.id)!;
       const skill = this.skills.get(agent.def.id)!;
+
+      const perception = await this.buildPerception(agent, tick, memory);
 
       const { plan, committed } = await this.planRuntime.ensurePlan({
         agentId: agent.def.id,
@@ -237,6 +269,8 @@ export class Runtime {
       }
       agent.state.zone = this.world.zoneAt(agent.state.position);
       agent.state.lastHeartbeatAt = simTime;
+
+      await this.maybeReflectAgent(agent.def.id, simTime, tick);
     }
 
     await this.sweepConversations(tick, simTime);
@@ -475,7 +509,8 @@ export class Runtime {
       case 'remember': {
         agent.apply(action);
         const memory = this.memories.get(agent.def.id)!;
-        await memory.addFact({ fact: action.fact, category: 'observation' });
+        const f = await memory.addFact({ fact: action.fact, category: 'observation' });
+        this.reflectionEngines.get(agent.def.id)?.noteNewFact(f);
         await memory.appendDailyNote(`t=${simTime.toFixed(1)}s ${action.fact}`);
         this.emit({ kind: 'action', tick, simTime, agentId: agent.def.id, action });
         return;
@@ -548,12 +583,13 @@ export class Runtime {
       if (!memory) continue;
       const others = participants.filter((p) => p !== id).map((p) => nameById.get(p) ?? p);
       const label = others.length > 0 ? others.join(' & ') : 'someone';
-      await memory.addFact({
+      const fact = await memory.addFact({
         fact: `talked with ${label}: ${transcriptSummary}`,
         category: 'relationship',
         related_entities: participants.filter((p) => p !== id),
         source: `conversation:${session.id}`,
       });
+      this.reflectionEngines.get(id)?.noteNewFact(fact);
       await memory.appendDailyNote(
         `t=${openedAt}s conversation with ${label} (${session.transcript.length} turns) — ${transcriptSummary}`,
       );
@@ -574,7 +610,11 @@ export class Runtime {
     }
   }
 
-  private buildPerception(agent: Agent, tick: number): Perception {
+  private async buildPerception(
+    agent: Agent,
+    tick: number,
+    memory: ParaMemory,
+  ): Promise<Perception> {
     const others = this.agents.filter((a) => a.def.id !== agent.def.id);
     const recentSpeech = this.recent.speech
       .filter((s) => s.speakerId !== agent.def.id)
@@ -584,17 +624,45 @@ export class Runtime {
         return chebyshevDistance(agent.state.position, speaker.state.position) <= this.speechRadius;
       })
       .map((s) => ({ speakerId: s.speakerId, speakerName: s.speakerName, text: s.text, at: s.at }));
+    const nearby = nearbyAgents(agent, others, this.perceptionRadius);
+    let recentFacts: MemoryFact[] = [];
+    if (this.recallLimit > 0) {
+      const recalled = await memory.recallForDecision({
+        limit: this.recallLimit,
+        relatedTo: nearby.map((n) => n.id),
+      });
+      recentFacts = recalled.map((r) => r.fact);
+    }
     return {
       tick,
       simTime: this.world.simTime,
       timeOfDay: timeOfDay(this.world.simTime),
       self: agent.snapshot(),
-      nearby: nearbyAgents(agent, others, this.perceptionRadius),
+      nearby,
       recentSpeech,
-      recentFacts: [],
+      recentFacts,
       worldBounds: { width: this.world.width, height: this.world.height },
       zones: [...this.world.zones],
     };
+  }
+
+  private async maybeReflectAgent(agentId: string, simTime: SimTime, tick: number): Promise<void> {
+    const engine = this.reflectionEngines.get(agentId);
+    if (!engine) return;
+    const memory = this.memories.get(agentId);
+    if (!memory) return;
+    const result = await engine.maybeReflect({ memory, simTime });
+    if (!result) return;
+    this.emit({
+      kind: 'reflection_written',
+      tick,
+      simTime,
+      agentId,
+      trigger: result.trigger,
+      reflectionId: result.reflection.id,
+      summary: result.reflection.fact,
+      sourceCount: result.sourceFactIds.length,
+    });
   }
 
   private pruneRecent(): void {

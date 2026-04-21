@@ -173,6 +173,8 @@ function formatEvent(event: RuntimeEvent): string {
       return `t=${t}  tick=${tick}  plan_replan  ${event.agentId.padEnd(16)}  reason=${event.reason}  ${event.detail}`;
     case 'plan_resume':
       return `t=${t}  tick=${tick}  plan_resume  ${event.agentId.padEnd(16)}  reason=${event.reason}`;
+    case 'reflection_written':
+      return `t=${t}  tick=${tick}  reflection   ${event.agentId.padEnd(16)}  trigger=${event.trigger}  src=${event.sourceCount}  ${event.summary}`;
   }
 }
 

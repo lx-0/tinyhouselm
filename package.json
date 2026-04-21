@@ -16,6 +16,8 @@
     "gen-personas": "pnpm --filter @tina/sim gen-personas",
     "profile": "pnpm --filter @tina/sim profile",
     "plan-demo": "pnpm --filter @tina/sim plan-demo",
+    "reflections-dump": "pnpm --filter @tina/sim reflections-dump",
+    "reflections-demo": "pnpm --filter @tina/sim reflections-demo",
     "web": "pnpm --filter @tina/web web",
     "test": "vitest run",
     "test:watch": "vitest",

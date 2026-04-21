@@ -219,6 +219,105 @@ describe('Runtime', () => {
     expect(resumes[0]).toMatchObject({ reason: 'conversation_ended' });
   });
 
+  it('writes a reflection when remember actions push past the importance budget', async () => {
+    const events: RuntimeEvent[] = [];
+    const root = await mkdtemp(join(tmpdir(), 'tina-refl-'));
+    const world = new World({
+      width: 16,
+      height: 16,
+      clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
+    });
+    const rememberPolicy: HeartbeatPolicy = {
+      async decide(ctx) {
+        return [
+          { kind: 'remember', fact: `noticed thing ${ctx.perception.tick}` },
+        ] satisfies AgentAction[];
+      },
+    };
+    const runtime = new Runtime({
+      world,
+      policy: rememberPolicy,
+      agents: [
+        {
+          skill: parseSkillSource(
+            '---\nname: thinker\ndescription: thoughtful introvert\n---\n\n# Thinker\n',
+            '/virtual/thinker/SKILL.md',
+          ),
+          memory: new ParaMemory({
+            root,
+            now: () => new Date('2026-04-18T00:00:00Z'),
+          }),
+          initial: { position: { x: 4, y: 4 } },
+        },
+      ],
+      seed: 1,
+      tickMs: 100,
+      reflections: { importanceBudget: 15, minFacts: 4 },
+      onEvent: (e) => events.push(e),
+    });
+
+    await runtime.runTicks(20);
+
+    const reflections = events.filter((e) => e.kind === 'reflection_written');
+    expect(reflections.length).toBeGreaterThan(0);
+    const first = reflections[0]!;
+    if (first.kind !== 'reflection_written') throw new Error('typeguard');
+    expect(first.trigger).toBe('importance_budget');
+    expect(first.sourceCount).toBeGreaterThanOrEqual(4);
+    expect(runtime.telemetrySnapshot().reflectionsWritten).toBe(reflections.length);
+  });
+
+  it('fills perception.recentFacts via recallForDecision so reflections rise to the top', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tina-recall-'));
+    const memory = new ParaMemory({ root, now: () => new Date('2026-04-18T00:00:00Z') });
+    // Pre-seed memory with a stale observation and a recent reflection.
+    await memory.addFact({ fact: 'rained at dawn', category: 'observation' });
+    await memory.addFact({
+      fact: 'spent the week at the cafe with Mei',
+      category: 'reflection',
+      related_entities: ['mei'],
+    });
+
+    let captured: { recentFactCount: number; firstCategory?: string } | null = null;
+    const captPolicy: HeartbeatPolicy = {
+      async decide(ctx) {
+        if (!captured) {
+          captured = {
+            recentFactCount: ctx.perception.recentFacts.length,
+            firstCategory: ctx.perception.recentFacts[0]?.category,
+          };
+        }
+        return [];
+      },
+    };
+
+    const world = new World({
+      width: 16,
+      height: 16,
+      clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
+    });
+    const runtime = new Runtime({
+      world,
+      policy: captPolicy,
+      agents: [
+        {
+          skill: parseSkillSource(
+            '---\nname: solo\ndescription: introvert\n---\n\n# Solo\n',
+            '/virtual/solo/SKILL.md',
+          ),
+          memory,
+          initial: { position: { x: 4, y: 4 } },
+        },
+      ],
+      seed: 1,
+      tickMs: 100,
+    });
+    await runtime.runTicks(1);
+    expect(captured).not.toBeNull();
+    expect(captured!.recentFactCount).toBeGreaterThan(0);
+    expect(captured!.firstCategory).toBe('reflection');
+  });
+
   it('goto moves the agent one step per tick until arrival', async () => {
     const events: RuntimeEvent[] = [];
     const root = await mkdtemp(join(tmpdir(), 'tina-goto-'));

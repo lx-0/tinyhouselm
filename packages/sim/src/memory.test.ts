@@ -52,4 +52,41 @@ describe('ParaMemory', () => {
     expect(facts).toHaveLength(2);
     expect(facts.map((f) => f.fact)).toEqual(['quiet', 'night owl']);
   });
+
+  it('addFact assigns category-default importance and respects overrides', async () => {
+    const { mem } = await newMemory();
+    const obs = await mem.addFact({ fact: 'walked by', category: 'observation' });
+    const milestone = await mem.addFact({ fact: 'finished thesis', category: 'milestone' });
+    const reflect = await mem.addFact({
+      fact: 'spent the week at the cafe',
+      category: 'reflection',
+      importance: 9,
+    });
+    expect(obs.importance).toBe(3);
+    expect(milestone.importance).toBe(8);
+    expect(reflect.importance).toBe(9);
+  });
+
+  it('recallForDecision ranks reflections above stale observations', async () => {
+    const { mem } = await newMemory();
+    // Old observation, low importance.
+    await mem.addFact({ fact: 'rained at dawn', category: 'observation' });
+    // Recent reflection, high importance.
+    await mem.addFact({
+      fact: 'spent the week with Mei at the cafe',
+      category: 'reflection',
+      related_entities: ['mei-tanaka'],
+    });
+    const recalled = await mem.recallForDecision({ limit: 2 });
+    expect(recalled).toHaveLength(2);
+    expect(recalled[0]!.fact.category).toBe('reflection');
+  });
+
+  it('recallForDecision uses query relevance to break ties', async () => {
+    const { mem } = await newMemory();
+    await mem.addFact({ fact: 'fixed the espresso machine', category: 'observation' });
+    await mem.addFact({ fact: 'painted in the studio', category: 'observation' });
+    const recalled = await mem.recallForDecision({ query: 'espresso', limit: 1 });
+    expect(recalled[0]!.fact.fact).toContain('espresso');
+  });
 });
