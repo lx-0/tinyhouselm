@@ -21,12 +21,16 @@ async function seedMemory(): Promise<ParaMemory> {
   return mem;
 }
 
-function mockFetchReturning(body: unknown, { status = 200 }: { status?: number } = {}): typeof fetch {
-  return vi.fn(async () =>
-    new Response(typeof body === 'string' ? body : JSON.stringify(body), {
-      status,
-      headers: { 'content-type': 'application/json' },
-    }),
+function mockFetchReturning(
+  body: unknown,
+  { status = 200 }: { status?: number } = {},
+): typeof fetch {
+  return vi.fn(
+    async () =>
+      new Response(typeof body === 'string' ? body : JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      }),
   ) as unknown as typeof fetch;
 }
 
@@ -63,7 +67,11 @@ describe('createLlmSynthesizer', () => {
       log: () => {},
     });
 
-    const bullets = await synth.synthesize(facts, { entity: 'mei', trigger: 'day_rollover', day: 1 });
+    const bullets = await synth.synthesize(facts, {
+      entity: 'mei',
+      trigger: 'day_rollover',
+      day: 1,
+    });
     expect(bullets).toHaveLength(3);
     expect(bullets[0]!.text).toContain('anxious');
     expect(bullets[0]!.sourceFactIds!.length).toBeGreaterThan(0);

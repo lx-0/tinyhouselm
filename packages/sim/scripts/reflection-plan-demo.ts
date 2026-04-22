@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Zone } from '@tina/shared';
 import { ParaMemory } from '../src/memory.js';
-import { PlanRuntime, generateDayPlan, type DayPlan } from '../src/plan.js';
+import { type DayPlan, PlanRuntime, generateDayPlan } from '../src/plan.js';
 import { parseSkillSource } from '../src/skills.js';
 
 const ZONES: Zone[] = [
@@ -46,7 +46,10 @@ function fmtPlan(label: string, plan: DayPlan): void {
     console.log(
       `  ${b.startHour.toFixed(0).padStart(2, ' ')}..${b.endHour
         .toFixed(0)
-        .padStart(2, ' ')}  ${b.id.padEnd(9)} ${b.activity.padEnd(10)} @ ${zone.padEnd(10)} — ${b.intent}`,
+        .padStart(
+          2,
+          ' ',
+        )}  ${b.id.padEnd(9)} ${b.activity.padEnd(10)} @ ${zone.padEnd(10)} — ${b.intent}`,
     );
   }
   console.log('');

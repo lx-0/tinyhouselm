@@ -88,7 +88,10 @@ export function createLlmSynthesizer(opts: LlmSynthesizerOptions): ReflectionSyn
     async synthesize(facts, ctx) {
       if (facts.length === 0) return [];
       if (opts.budget?.exhausted()) {
-        log('warn', 'reflection.llm.budget_exhausted', { entity: ctx.entity, trigger: ctx.trigger });
+        log('warn', 'reflection.llm.budget_exhausted', {
+          entity: ctx.entity,
+          trigger: ctx.trigger,
+        });
         return fallback.synthesize(facts, ctx);
       }
 
