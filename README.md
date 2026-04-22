@@ -2,6 +2,8 @@
 
 Live simulation of hundreds of AI personas with a pixelated UI. Agents are defined in [agentskills.io](https://agentskills.io) format and keep durable memory via `para-memory`.
 
+**Live demo:** https://tinyhouse.up.railway.app · admin overlay at `/admin` · `/health` for telemetry.
+
 Reference: [joonspk-research/generative_agents](https://github.com/joonspk-research/generative_agents).
 
 ## Stack
@@ -67,7 +69,8 @@ See the [TINA-2 plan document](./docs/architecture.md) — or open the issue in 
 
 ## Deploy
 
-The repo ships a Dockerfile and `railway.toml` wired to the `@tina/web` server.
+The live demo runs on Railway: https://tinyhouse.up.railway.app. The repo ships
+a Dockerfile and `railway.toml` wired to the `@tina/web` server.
 
 - **Health:** `GET /health` returns structured telemetry (tick p95, actions/min,
   conversations/min, LLM budget state). `GET /ready` is the 200/503 liveness
