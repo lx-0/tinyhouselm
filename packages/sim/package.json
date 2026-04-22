@@ -13,7 +13,8 @@
     "profile": "tsx scripts/profile.ts",
     "plan-demo": "tsx scripts/plan-demo.ts",
     "reflections-dump": "tsx scripts/reflections-dump.ts",
-    "reflections-demo": "tsx scripts/reflections-demo.ts"
+    "reflections-demo": "tsx scripts/reflections-demo.ts",
+    "reflection-plan-demo": "tsx scripts/reflection-plan-demo.ts"
   },
   "dependencies": {
     "@tina/shared": "workspace:*",
