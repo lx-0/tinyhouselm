@@ -58,7 +58,11 @@ pnpm lint
   `LLM_GATEWAY_URL`, `LLM_GATEWAY_MODEL`) to route through the Yesterday AI
   LLM Gateway, or set `ANTHROPIC_API_KEY` (+ optional `REFLECTION_MODEL`) to
   hit Anthropic directly. With neither set, reflections run fully
-  deterministically.
+  deterministically. Reflection cadence is tunable via
+  `REFLECTION_IMPORTANCE_BUDGET` (default `30`), `REFLECTION_MIN_FACTS`
+  (default `5`), and `REFLECTION_WINDOW_SIZE` (default `25`) — raising
+  `REFLECTION_IMPORTANCE_BUDGET` is the main dial for reducing LLM call
+  frequency without touching `SIM_SPEED`.
 - `pnpm profile --agents N --ticks T` synthesizes N stub personas in a tmpdir
   and reports ms/tick percentiles — used to check that the runtime stays
   within the tick budget as the agent count grows.

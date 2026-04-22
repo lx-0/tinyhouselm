@@ -23,6 +23,7 @@ import { createBudget, resolveBudgetCap } from './budget.js';
 import { InterventionHandlers } from './intervention.js';
 import { log } from './logger.js';
 import { ObservabilityStore } from './observability.js';
+import { mergeReflectionOptions, resolveReflectionTunables } from './reflection-config.js';
 import { buildSnapshot } from './snapshot.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -130,12 +131,20 @@ async function main(): Promise<void> {
     });
     synthProvider = 'anthropic';
   }
+  const reflectionTunables = resolveReflectionTunables();
+  const reflectionOpts = mergeReflectionOptions(
+    llmSynth ? { synthesizer: llmSynth } : {},
+    reflectionTunables,
+  );
   log.info('web.reflection.synth', {
     provider: synthProvider,
     llm: !!llmSynth,
     budgetCapUsd: budget.state().capUsd,
     gatewayModel:
       synthProvider === 'gateway' ? process.env.LLM_GATEWAY_MODEL || 'default' : undefined,
+    importanceBudget: reflectionTunables.importanceBudget,
+    minFacts: reflectionTunables.minFacts,
+    windowSize: reflectionTunables.windowSize,
   });
 
   const runtime = new Runtime({
@@ -143,7 +152,7 @@ async function main(): Promise<void> {
     world,
     tickMs: TICK_MS,
     seed: SEED,
-    reflections: llmSynth ? { synthesizer: llmSynth } : {},
+    reflections: reflectionOpts,
   });
 
   log.info('web.personas.loaded', { count: skills.length });
