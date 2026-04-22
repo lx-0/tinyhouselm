@@ -11,7 +11,11 @@ import type {
 } from '@tina/shared';
 import { Agent, type AgentState } from './agent.js';
 import { SimulationClock } from './clock.js';
-import { ConversationRegistry, type ConversationSession } from './conversation.js';
+import {
+  type CloseReason,
+  ConversationRegistry,
+  type ConversationSession,
+} from './conversation.js';
 import type { HeartbeatPolicy } from './heartbeat.js';
 import { DefaultHeartbeatPolicy, makeRngForAgent } from './heartbeat.js';
 import type { MemoryFact, ParaMemory } from './memory.js';
@@ -91,7 +95,7 @@ export type RuntimeEvent =
       sessionId: string;
       participants: string[];
       transcript: ConversationTurn[];
-      reason: 'drifted' | 'idle';
+      reason: CloseReason;
     }
   | {
       kind: 'plan_committed';
@@ -421,7 +425,7 @@ export class Runtime {
   async flushConversations(): Promise<void> {
     const simTime = this.world.simTime;
     const tick = this.tickIndex;
-    const pending: Array<{ session: ConversationSession; reason: 'drifted' | 'idle' }> = [];
+    const pending: Array<{ session: ConversationSession; reason: CloseReason }> = [];
     this.conversations.drain({
       onClose: (session, reason) => pending.push({ session, reason }),
     });
@@ -951,7 +955,7 @@ export class Runtime {
   private async sweepConversations(tick: number, simTime: SimTime): Promise<void> {
     const positions = new Map<string, Vec2>();
     for (const agent of this.agents) positions.set(agent.def.id, agent.state.position);
-    const pending: Array<{ session: ConversationSession; reason: 'drifted' | 'idle' }> = [];
+    const pending: Array<{ session: ConversationSession; reason: CloseReason }> = [];
     this.conversations.sweep(positions, simTime, {
       onClose: (session, reason) => pending.push({ session, reason }),
     });
@@ -962,7 +966,7 @@ export class Runtime {
 
   private async handleConversationClose(
     session: ConversationSession,
-    reason: 'drifted' | 'idle',
+    reason: CloseReason,
     tick: number,
     simTime: SimTime,
   ): Promise<void> {

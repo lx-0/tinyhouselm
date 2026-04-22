@@ -149,7 +149,7 @@ export type Delta =
       participants: string[];
       transcript: ConversationTurn[];
       simTime: SimTime;
-      reason: 'drifted' | 'idle';
+      reason: 'drifted' | 'idle' | 'aged';
     }
   | {
       kind: 'plan_committed';

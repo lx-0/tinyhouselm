@@ -17,7 +17,7 @@ export interface ObservabilityConversation {
   transcript: ConversationTurn[];
   openedAt: SimTime;
   closedAt: SimTime;
-  reason: 'drifted' | 'idle';
+  reason: 'drifted' | 'idle' | 'aged';
 }
 
 export interface ObservabilityPlanEvent {

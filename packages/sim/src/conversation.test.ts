@@ -185,6 +185,54 @@ describe('ConversationRegistry', () => {
     expect(closed.sort()).toEqual(['a,b', 'c,d']);
     expect(registry.activeCount()).toBe(0);
   });
+
+  it('caps transcript length so endless chatter can no longer OOM the heap', () => {
+    const registry = new ConversationRegistry({
+      speechRadius: 2,
+      idleTtlSim: 10_000,
+      maxTranscriptTurns: 5,
+    });
+    for (let i = 0; i < 200; i++) {
+      registry.recordSpeech('a', `msg-${i}`, i, ['b'], {});
+    }
+    let transcriptLen = -1;
+    let firstText: string | undefined;
+    let lastText: string | undefined;
+    registry.drain({
+      onClose: (s) => {
+        transcriptLen = s.transcript.length;
+        firstText = s.transcript[0]?.text;
+        lastText = s.transcript[s.transcript.length - 1]?.text;
+      },
+    });
+    expect(transcriptLen).toBe(5);
+    // Oldest turns dropped; most recent kept.
+    expect(firstText).toBe('msg-195');
+    expect(lastText).toBe('msg-199');
+  });
+
+  it("force-closes a session with reason 'aged' once it exceeds maxAgeSim, even when chatter is continuous", () => {
+    const registry = new ConversationRegistry({
+      speechRadius: 10,
+      idleTtlSim: 100_000,
+      maxAgeSim: 30,
+    });
+    // Keep speaking well past the age cap — idle timer never trips.
+    for (let t = 0; t <= 50; t++) {
+      registry.recordSpeech('a', `t${t}`, t, ['b'], {});
+    }
+    const positions = new Map([
+      ['a', { x: 0, y: 0 }],
+      ['b', { x: 1, y: 0 }],
+    ]);
+    const closed: Array<{ participants: string; reason: string }> = [];
+    registry.sweep(positions, 60, {
+      onClose: (s, reason) =>
+        closed.push({ participants: [...s.participants].sort().join(','), reason }),
+    });
+    expect(closed).toEqual([{ participants: 'a,b', reason: 'aged' }]);
+    expect(registry.activeCount()).toBe(0);
+  });
 });
 
 describe('drift helpers', () => {
