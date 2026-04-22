@@ -10,27 +10,27 @@ Living document. The CEO updates this as milestones ship. The CTO drives the nex
 - `TINA-5` — pixelated renderer
 - `TINA-6` — 100+ personas, telemetry, optimization
 
-## v0.2 — "Make it feel alive"
+## Shipped — v0.2 "Make it feel alive" ✅
 
-Goal: the world stops looking like agents bumping into each other. Agents pursue goals over time, live by a schedule, and carry memory that compounds across simulated days.
+- `TINA-7` — hierarchical day → hour → tick plans, surprise-triggered replan, para-memory persistence
+- `TINA-8` — simulated diurnal clock + persona schedule archetypes (wake/work/meals/sleep)
+- `TINA-9` / `TINA-16` — reflections (importance-budget + day-rollover triggers, LLM synthesizer with deterministic fallback, carried into next-day plans as bullets + zone avoidances)
+- `TINA-10` — tiled world with rooms, named locations, affordances, A\* pathfinding
 
-- `TINA-7` — **Agent goals & plans.** Hierarchical intent (day plan → hour plan → current action). Agents pursue multi-tick goals. Plans replan on surprise.
-- `TINA-8` — **Day / night cycle + persona schedules.** Diurnal clock drives routines (wake, eat, work, sleep). Each persona has a baseline weekly schedule they deviate from under pressure.
-- `TINA-9` — **Reflections.** Periodic memory consolidation — agents summarize recent events into higher-order reflections stored in `para-memory`, so long-run context stays tight without losing signal.
-- `TINA-10` — **Tiled world v1.** Rooms, named locations, furniture affordances, A\* pathfinding. Replaces the zone-grid with a real map.
+## Shipped — v0.3 "Make it shareable" ✅
 
-## v0.3 — "Make it shareable"
+- `TINA-11` — public Railway deploy, structured logs, health checks, LLM cost caps
+- `TINA-12` — `/admin` observability dashboard: live conversation feed, relationship graph, per-agent mood/plan/reflection cards
 
-Goal: anyone with a link can watch the town live. We put eyes on it.
+## v0.4 — "Make it interactive"
 
-- `TINA-11` — **Public deploy + demo URL.** Stand up a hosted instance (Railway, Fly, or similar) with a public URL. Production-grade logging, health checks, LLM cost caps.
-- `TINA-12` — **Live observability dashboard.** Conversation feed, relationship graph, per-agent mood/goals timeline. Either an extension of the existing web page or a second admin panel.
+Goal: turn passive viewers into participants. Watching is a fishbowl; acting on the world is a demo people remember and share.
 
-## v0.4 — "Make it interactive" (tentative, revisit after v0.3)
+Ordered by impact. `TINA-17` first because it's the single biggest lever on retention — the "I poked it and something happened" moment.
 
-- Viewer interventions (inject an event, whisper to an agent, drop an object).
-- Named characters with authored personas alongside procedural ones.
-- Save/resume world state.
+- `TINA-17` — **Viewer interventions (MVP).** From `/admin`: inject a world event, whisper to an agent, drop/remove an object. Interventions enter the perception stream, so plan/replan/reflection pipelines handle them for free. Admin gate + rate-limit only.
+- `TINA-18` — **Save / resume world state.** Snapshot world + per-agent para-memory + plan state to disk; restore on boot. Unblocks long-running demos across deploys.
+- `TINA-19` — **Named characters.** Curated authored personas alongside procedural ones, so visitors have named entry points ("go find Mei"). Depends on `TINA-17` — intervention UI is how people actually find them.
 
 ## Non-goals (explicit)
 
@@ -39,7 +39,7 @@ Goal: anyone with a link can watch the town live. We put eyes on it.
 - Marketplace / user-contributed personas.
 - Monetization.
 
-We revisit scope after v0.3 ships. Shipping a shareable demo is the forcing function; everything else can wait.
+v0.3 shipped; the forcing function flips to "can a visitor *do* something." Revisit scope after v0.4 ships.
 
 ## How this is driven
 
