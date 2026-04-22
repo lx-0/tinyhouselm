@@ -42,6 +42,25 @@ export type AgentAction =
   | { kind: 'remember'; fact: string }
   | { kind: 'set_goal'; goal: string };
 
+export type AgentMood =
+  | 'focused'
+  | 'chatty'
+  | 'relaxed'
+  | 'restless'
+  | 'drowsy'
+  | 'engaged'
+  | 'idle';
+
+export type PlanContext = {
+  day: number;
+  summary: string;
+  blockId: string;
+  blockIntent: string;
+  blockActivity: string;
+  preferredZone: string | null;
+  suspendedReason: string | null;
+};
+
 export type AgentSnap = {
   id: string;
   name: string;
@@ -50,6 +69,8 @@ export type AgentSnap = {
   currentAction: string;
   zone?: string | null;
   gotoTarget?: Vec2 | null;
+  mood?: AgentMood;
+  plan?: PlanContext | null;
 };
 
 export type Zone = { name: string; x: number; y: number; width: number; height: number };
@@ -118,6 +139,42 @@ export type Delta =
       transcript: ConversationTurn[];
       simTime: SimTime;
       reason: 'drifted' | 'idle';
+    }
+  | {
+      kind: 'plan_committed';
+      id: string;
+      day: number;
+      summary: string;
+      simTime: SimTime;
+    }
+  | {
+      kind: 'plan_replan';
+      id: string;
+      reason: string;
+      detail: string;
+      simTime: SimTime;
+    }
+  | {
+      kind: 'plan_resume';
+      id: string;
+      reason: string;
+      simTime: SimTime;
+    }
+  | {
+      kind: 'reflection';
+      id: string;
+      reflectionId: string;
+      summary: string;
+      sourceCount: number;
+      trigger: 'day_rollover' | 'importance_budget' | 'manual';
+      simTime: SimTime;
+    }
+  | {
+      kind: 'agent_context';
+      id: string;
+      mood: AgentMood;
+      plan: PlanContext | null;
+      simTime: SimTime;
     };
 
 export type StreamMessage = Snapshot | Delta;

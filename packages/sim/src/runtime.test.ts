@@ -361,6 +361,28 @@ describe('Runtime', () => {
     expect(trace[5]).toEqual({ x: 7, y: 2 });
   });
 
+  it('agentContext exposes mood + active plan block after first tick', async () => {
+    const { runtime } = await makeRuntime(17);
+    await runtime.runTicks(1);
+    const ctx = runtime.agentContext('alpha');
+    expect(ctx.plan).not.toBeNull();
+    expect(ctx.plan!.day).toBe(0);
+    expect(ctx.plan!.summary.length).toBeGreaterThan(10);
+    expect(ctx.plan!.blockId.length).toBeGreaterThan(0);
+    expect(['focused', 'chatty', 'relaxed', 'restless', 'drowsy', 'engaged', 'idle']).toContain(
+      ctx.mood,
+    );
+  });
+
+  it('setOnEvent replaces the observer callback post-construction', async () => {
+    const { runtime } = await makeRuntime(19);
+    const after: string[] = [];
+    runtime.setOnEvent((e) => after.push(e.kind));
+    await runtime.runTicks(2);
+    expect(after.filter((k) => k === 'tick').length).toBe(2);
+    expect(after.includes('plan_committed')).toBe(true);
+  });
+
   it('routes around a wall via A* without clipping', async () => {
     // 5-wide world with a vertical wall at x=2, gap at the bottom row.
     //   . . W . .

@@ -6,6 +6,7 @@ import type { Delta, Vec2 } from '@tina/shared';
 import {
   ParaMemory,
   Runtime,
+  type RuntimeEvent,
   SimulationClock,
   World,
   buildStarterTown,
@@ -18,6 +19,7 @@ import {
 import { build as esbuild } from 'esbuild';
 import { createBudget, resolveBudgetCap } from './budget.js';
 import { log } from './logger.js';
+import { ObservabilityStore } from './observability.js';
 import { buildSnapshot } from './snapshot.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -39,8 +41,8 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
-async function bundleClient(): Promise<string> {
-  const entry = resolve(__dirname, 'client', 'main.ts');
+async function bundleClient(entryFile: string): Promise<string> {
+  const entry = resolve(__dirname, 'client', entryFile);
   const result = await esbuild({
     entryPoints: [entry],
     bundle: true,
@@ -52,7 +54,7 @@ async function bundleClient(): Promise<string> {
     logLevel: 'warning',
   });
   const out = result.outputFiles[0];
-  if (!out) throw new Error('client bundle produced no output');
+  if (!out) throw new Error(`client bundle for ${entryFile} produced no output`);
   return out.text;
 }
 
@@ -61,7 +63,8 @@ async function main(): Promise<void> {
   const budget = createBudget(resolveBudgetCap());
   log.info('web.boot.start', { port: PORT, seed: SEED, tickMs: TICK_MS, simSpeed: SIM_SPEED });
 
-  const clientJs = await bundleClient();
+  const clientJs = await bundleClient('main.ts');
+  const adminJs = await bundleClient('admin.ts');
 
   const agentsDir = resolve(REPO_ROOT, 'world', 'agents');
   const skills = await loadAllSkills(agentsDir);
@@ -115,7 +118,101 @@ async function main(): Promise<void> {
     for (const res of clients) res.write(line);
   }
 
+  const observability = new ObservabilityStore();
+  const nameById = new Map<string, string>();
+  for (const skill of skills) nameById.set(skill.id, skill.displayName);
+  const displayName = (id: string) => nameById.get(id) ?? id;
+
+  runtime.setOnEvent((event: RuntimeEvent) => {
+    switch (event.kind) {
+      case 'plan_committed': {
+        observability.recordPlanEvent({
+          kind: 'plan_committed',
+          id: event.agentId,
+          name: displayName(event.agentId),
+          simTime: event.simTime,
+          detail: event.summary,
+        });
+        broadcast({
+          kind: 'plan_committed',
+          id: event.agentId,
+          day: event.day,
+          summary: event.summary,
+          simTime: event.simTime,
+        });
+        return;
+      }
+      case 'plan_replan': {
+        observability.recordPlanEvent({
+          kind: 'plan_replan',
+          id: event.agentId,
+          name: displayName(event.agentId),
+          simTime: event.simTime,
+          detail: `${event.reason}: ${event.detail}`,
+        });
+        broadcast({
+          kind: 'plan_replan',
+          id: event.agentId,
+          reason: event.reason,
+          detail: event.detail,
+          simTime: event.simTime,
+        });
+        return;
+      }
+      case 'plan_resume': {
+        observability.recordPlanEvent({
+          kind: 'plan_resume',
+          id: event.agentId,
+          name: displayName(event.agentId),
+          simTime: event.simTime,
+          detail: event.reason,
+        });
+        broadcast({
+          kind: 'plan_resume',
+          id: event.agentId,
+          reason: event.reason,
+          simTime: event.simTime,
+        });
+        return;
+      }
+      case 'reflection_written': {
+        observability.recordReflection({
+          id: event.agentId,
+          name: displayName(event.agentId),
+          reflectionId: event.reflectionId,
+          summary: event.summary,
+          sourceCount: event.sourceCount,
+          trigger: event.trigger,
+          simTime: event.simTime,
+        });
+        broadcast({
+          kind: 'reflection',
+          id: event.agentId,
+          reflectionId: event.reflectionId,
+          summary: event.summary,
+          sourceCount: event.sourceCount,
+          trigger: event.trigger,
+          simTime: event.simTime,
+        });
+        return;
+      }
+      case 'conversation_close': {
+        observability.recordConversation({
+          sessionId: event.sessionId,
+          participants: [...event.participants],
+          participantNames: event.participants.map((id) => displayName(id)),
+          transcript: event.transcript.map((t) => ({ ...t })),
+          openedAt: event.transcript[0]?.at ?? event.simTime,
+          closedAt: event.simTime,
+          reason: event.reason,
+        });
+        return;
+      }
+    }
+  });
+
   const indexHtml = await readFile(resolve(PUBLIC_DIR, 'index.html'), 'utf8');
+  const adminHtml = await readFile(resolve(PUBLIC_DIR, 'admin.html'), 'utf8');
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
@@ -134,6 +231,26 @@ async function main(): Promise<void> {
       res.end(clientJs);
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/admin') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(adminHtml);
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/admin.js') {
+      res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
+      res.end(adminJs);
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/admin/bootstrap') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          snapshot: buildSnapshot(world, runtime),
+          ...observability.bootstrap(),
+        }),
+      );
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/stream') {
       res.writeHead(200, {
         'content-type': 'text/event-stream',
@@ -141,7 +258,7 @@ async function main(): Promise<void> {
         connection: 'keep-alive',
         'x-accel-buffering': 'no',
       });
-      res.write(encoder(buildSnapshot(world)));
+      res.write(encoder(buildSnapshot(world, runtime)));
       clients.add(res);
       const heartbeat = setInterval(() => res.write(': hb\n\n'), 15000);
       req.on('close', () => {

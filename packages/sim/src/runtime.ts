@@ -1,4 +1,12 @@
-import type { AgentAction, ConversationTurn, Delta, SimTime, Vec2 } from '@tina/shared';
+import type {
+  AgentAction,
+  AgentMood,
+  ConversationTurn,
+  Delta,
+  PlanContext,
+  SimTime,
+  Vec2,
+} from '@tina/shared';
 import { Agent, type AgentState } from './agent.js';
 import { SimulationClock } from './clock.js';
 import { ConversationRegistry, type ConversationSession } from './conversation.js';
@@ -7,7 +15,7 @@ import { DefaultHeartbeatPolicy, makeRngForAgent } from './heartbeat.js';
 import type { MemoryFact, ParaMemory } from './memory.js';
 import { findPath } from './path.js';
 import { type Perception, chebyshevDistance, nearbyAgents, timeOfDay } from './perception.js';
-import { type DayPlan, PlanRuntime } from './plan.js';
+import { type DayPlan, PlanRuntime, activeBlock, simHour } from './plan.js';
 import { ReflectionEngine, type ReflectionEngineOptions } from './reflection.js';
 import type { SkillDocument } from './skills.js';
 import { TelemetryCollector, type TelemetrySnapshot } from './telemetry.js';
@@ -129,7 +137,7 @@ export class Runtime {
   private readonly speechRadius: number;
   private readonly speechTtlMs: number;
   private readonly seed: number;
-  private readonly onEvent?: (event: RuntimeEvent) => void;
+  private onEventCb?: (event: RuntimeEvent) => void;
   private readonly agents: Agent[] = [];
   private readonly memories = new Map<string, ParaMemory>();
   private readonly skills = new Map<string, SkillDocument>();
@@ -153,7 +161,7 @@ export class Runtime {
     const conversationIdleMs = opts.conversationIdleMs ?? this.speechTtlMs * 4;
     this.seed = opts.seed ?? 0;
     this.policy = opts.policy ?? new DefaultHeartbeatPolicy();
-    this.onEvent = opts.onEvent;
+    this.onEventCb = opts.onEvent;
     this.memoryFlushEveryTicks = opts.memoryFlushEveryTicks ?? 10;
     this.telemetry = opts.telemetry ?? new TelemetryCollector();
     this.reflectionsEnabled = opts.reflections !== false;
@@ -206,7 +214,36 @@ export class Runtime {
 
   private emit(event: RuntimeEvent): void {
     this.telemetry.observe(event);
-    this.onEvent?.(event);
+    this.onEventCb?.(event);
+  }
+
+  /** Subscribe (or replace) the runtime event observer. */
+  setOnEvent(cb: ((event: RuntimeEvent) => void) | undefined): void {
+    this.onEventCb = cb;
+  }
+
+  /**
+   * Derive a lightweight observability snapshot for one agent: current mood and
+   * the active plan block. Used by admin dashboards — no-op for agents we've
+   * never seen a plan for.
+   */
+  agentContext(agentId: string): { mood: AgentMood; plan: PlanContext | null } {
+    const plan = this.planRuntime.getPlan(agentId);
+    const agent = this.agents.find((a) => a.def.id === agentId);
+    const suspended = this.planRuntime.suspension(agentId);
+    if (!plan || !agent) return { mood: 'idle', plan: null };
+    const hour = simHour(this.world.simTime);
+    const block = activeBlock(plan, hour);
+    const ctx: PlanContext = {
+      day: plan.day,
+      summary: plan.summary,
+      blockId: block?.id ?? 'idle',
+      blockIntent: block?.intent ?? 'no active block',
+      blockActivity: block?.activity ?? 'rest',
+      preferredZone: block?.preferredZone ?? null,
+      suspendedReason: suspended,
+    };
+    return { mood: deriveMood(block?.activity, suspended, agent.state.currentAction), plan: ctx };
   }
 
   async tickOnce(): Promise<Delta[]> {
@@ -695,5 +732,28 @@ export class Runtime {
   private pruneRecent(): void {
     const now = this.world.simTime;
     this.recent.speech = this.recent.speech.filter((s) => s.expireAt >= now);
+  }
+}
+
+function deriveMood(
+  activity: string | undefined,
+  suspended: string | null,
+  currentAction: string,
+): AgentMood {
+  if (suspended === 'conversation') return 'engaged';
+  if (currentAction.startsWith('speaking')) return 'chatty';
+  switch (activity) {
+    case 'work':
+      return 'focused';
+    case 'socialize':
+      return 'chatty';
+    case 'eat':
+      return 'relaxed';
+    case 'wander':
+      return 'restless';
+    case 'rest':
+      return 'drowsy';
+    default:
+      return 'idle';
   }
 }

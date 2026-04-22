@@ -1,7 +1,7 @@
 import { type Snapshot, type Tile, deriveWorldClock } from '@tina/shared';
-import type { World } from '@tina/sim';
+import type { Runtime, World } from '@tina/sim';
 
-export function buildSnapshot(world: World): Snapshot {
+export function buildSnapshot(world: World, runtime?: Runtime): Snapshot {
   const tiles: Tile[] = world.tileMap
     ? world.tileMap.tiles.map((t) => ({ ...t }))
     : new Array(world.width * world.height).fill({ kind: 'grass', walkable: true });
@@ -17,6 +17,11 @@ export function buildSnapshot(world: World): Snapshot {
       zones: [...world.zones],
       locations: world.locations,
     },
-    agents: world.listAgents().map((a) => a.snapshot()),
+    agents: world.listAgents().map((a) => {
+      const snap = a.snapshot();
+      if (!runtime) return snap;
+      const ctx = runtime.agentContext(snap.id);
+      return { ...snap, mood: ctx.mood, plan: ctx.plan };
+    }),
   };
 }
