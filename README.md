@@ -53,7 +53,12 @@ pnpm lint
   streams snapshots + deltas over Server-Sent Events to a canvas client.
   `GET /health` returns live telemetry; `GET /ready` is the liveness probe.
   Config via env: `PORT`, `SIM_SPEED`, `TICK_MS`, `SEED`, `SIM_START_HOUR`,
-  `LLM_BUDGET_USD`, `HEARTBEAT_LOG_TICKS`, `LOG_LEVEL`.
+  `LLM_BUDGET_USD`, `HEARTBEAT_LOG_TICKS`, `LOG_LEVEL`. Reflection LLM
+  provider is auto-selected: set `LLM_GATEWAY_KEY` (+ optional
+  `LLM_GATEWAY_URL`, `LLM_GATEWAY_MODEL`) to route through the Yesterday AI
+  LLM Gateway, or set `ANTHROPIC_API_KEY` (+ optional `REFLECTION_MODEL`) to
+  hit Anthropic directly. With neither set, reflections run fully
+  deterministically.
 - `pnpm profile --agents N --ticks T` synthesizes N stub personas in a tmpdir
   and reports ms/tick percentiles — used to check that the runtime stays
   within the tick budget as the agent count grows.
@@ -78,8 +83,19 @@ a Dockerfile and `railway.toml` wired to the `@tina/web` server.
 - **Logs:** one JSON line per event on stdout/stderr. A `sim.heartbeat` line
   is emitted every `HEARTBEAT_LOG_TICKS` ticks (default 300, ≈60s at 200ms).
 - **LLM cost cap:** `LLM_BUDGET_USD` (default `5`) wires a hard cap into the
-  web process for when an LLM-backed heartbeat policy lands. Exceeding 80% logs
-  a warning; exhaustion flips `llmBudget.exhausted` in `/health`.
+  web process. Counts against reflection synthesis — direct Anthropic and
+  gateway paths both `budget.record(cost, ...)` from the `usage` block of
+  each call. Exceeding 80% logs a warning; exhaustion flips
+  `llmBudget.exhausted` in `/health` and future reflections transparently
+  fall back to the deterministic synthesizer.
+- **Reflection provider:** auto-selected from env. Priority:
+  `LLM_GATEWAY_KEY` → OpenAI-compatible gateway at `LLM_GATEWAY_URL`
+  (default `https://llm.yester.cloud/v1`), tier via `LLM_GATEWAY_MODEL`
+  (default `default`; also useful: `cheap`, `smart`, `quality`). Else
+  `ANTHROPIC_API_KEY` → Anthropic Messages API, model via
+  `REFLECTION_MODEL` (default `claude-haiku-4-5-20251001`). Else
+  deterministic-only. The boot log line `web.reflection.synth` reports
+  which provider is active.
 
 Deploy locally with Docker:
 

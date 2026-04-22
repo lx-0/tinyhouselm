@@ -10,6 +10,7 @@ import {
   SimulationClock,
   World,
   buildStarterTown,
+  createGatewaySynthesizer,
   createLlmSynthesizer,
   homeForAgent,
   loadAllSkills,
@@ -103,16 +104,39 @@ async function main(): Promise<void> {
     };
   });
 
+  // Reflection synthesizer selection, in priority order:
+  //   1. LLM_GATEWAY_KEY      → OpenAI-compatible gateway (llm.yester.cloud by default)
+  //   2. ANTHROPIC_API_KEY    → direct Anthropic Messages API
+  //   3. neither              → deterministic fallback inside the engine
+  const gatewayKey = process.env.LLM_GATEWAY_KEY?.trim();
   const anthropicKey = process.env.ANTHROPIC_API_KEY?.trim();
-  const llmSynth = anthropicKey
-    ? createLlmSynthesizer({
-        apiKey: anthropicKey,
-        budget,
-        log: (level, event, fields) => log[level](event, fields),
-        model: process.env.REFLECTION_MODEL || undefined,
-      })
-    : undefined;
-  log.info('web.reflection.synth', { llm: !!llmSynth, budgetCapUsd: budget.state().capUsd });
+  let llmSynth: ReturnType<typeof createLlmSynthesizer> | undefined;
+  let synthProvider: 'gateway' | 'anthropic' | 'none' = 'none';
+  if (gatewayKey) {
+    llmSynth = createGatewaySynthesizer({
+      apiKey: gatewayKey,
+      baseUrl: process.env.LLM_GATEWAY_URL || undefined,
+      model: process.env.LLM_GATEWAY_MODEL || undefined,
+      budget,
+      log: (level, event, fields) => log[level](event, fields),
+    });
+    synthProvider = 'gateway';
+  } else if (anthropicKey) {
+    llmSynth = createLlmSynthesizer({
+      apiKey: anthropicKey,
+      budget,
+      log: (level, event, fields) => log[level](event, fields),
+      model: process.env.REFLECTION_MODEL || undefined,
+    });
+    synthProvider = 'anthropic';
+  }
+  log.info('web.reflection.synth', {
+    provider: synthProvider,
+    llm: !!llmSynth,
+    budgetCapUsd: budget.state().capUsd,
+    gatewayModel:
+      synthProvider === 'gateway' ? process.env.LLM_GATEWAY_MODEL || 'default' : undefined,
+  });
 
   const runtime = new Runtime({
     agents: runtimeAgents,

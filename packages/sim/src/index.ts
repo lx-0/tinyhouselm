@@ -33,6 +33,8 @@ export type {
 } from './reflection.js';
 export { createLlmSynthesizer } from './llm-reflection.js';
 export type { LlmBudget, LlmSynthesizerOptions } from './llm-reflection.js';
+export { createGatewaySynthesizer } from './llm-gateway.js';
+export type { GatewayBudget, GatewaySynthesizerOptions } from './llm-gateway.js';
 export {
   timeOfDay,
   chebyshevDistance,
