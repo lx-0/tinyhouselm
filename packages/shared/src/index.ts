@@ -98,6 +98,16 @@ export type TileMap = {
   areas: Zone[];
 };
 
+export type WorldObject = {
+  id: string;
+  label: string;
+  pos: Vec2;
+  zone: string | null;
+  droppedAtSim: SimTime;
+};
+
+export type InterventionKind = 'whisper' | 'world_event' | 'object_drop' | 'object_remove';
+
 export type ConversationTurn = {
   speakerId: string;
   text: string;
@@ -115,6 +125,7 @@ export type Snapshot = {
     tiles: Tile[];
     zones: Zone[];
     locations: Location[];
+    objects: WorldObject[];
   };
   agents: AgentSnap[];
 };
@@ -174,6 +185,17 @@ export type Delta =
       id: string;
       mood: AgentMood;
       plan: PlanContext | null;
+      simTime: SimTime;
+    }
+  | { kind: 'object_add'; object: WorldObject; simTime: SimTime }
+  | { kind: 'object_remove'; id: string; label: string; simTime: SimTime }
+  | {
+      kind: 'intervention';
+      type: InterventionKind;
+      summary: string;
+      target: string | null;
+      zone: string | null;
+      affected: string[];
       simTime: SimTime;
     };
 
