@@ -13,8 +13,22 @@ import type {
 } from '@tina/shared';
 import { deriveWorldClock } from '@tina/shared';
 
+interface SnapshotStatusPayload {
+  enabled: boolean;
+  everyTicks: number;
+  dir: string;
+  lastSavedAt: string | null;
+  lastTickIndex: number | null;
+  lastDurationMs: number | null;
+  lastError: string | null;
+  inFlight: boolean;
+  saves: number;
+  failures: number;
+}
+
 interface BootstrapPayload {
   snapshot: Snapshot;
+  snapshotStatus: SnapshotStatusPayload | null;
   conversations: Array<{
     sessionId: string;
     participants: string[];
@@ -781,12 +795,104 @@ objectDropBtn.addEventListener('click', () => {
   });
 });
 
+const snapshotStatusEl = document.getElementById('snapshot-status') as HTMLElement;
+const snapshotSaveBtn = document.getElementById('snapshot-save') as HTMLButtonElement;
+const snapshotActionStatusEl = document.getElementById('snapshot-action-status') as HTMLElement;
+
+function fmtRelative(iso: string): string {
+  const age = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(age) || age < 0) return iso;
+  const s = Math.round(age / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  return `${h}h ago`;
+}
+
+function renderSnapshotStatus(s: SnapshotStatusPayload | null): void {
+  if (!s) {
+    snapshotStatusEl.textContent = 'snapshots disabled';
+    snapshotStatusEl.className = 'status';
+    snapshotSaveBtn.disabled = true;
+    return;
+  }
+  snapshotSaveBtn.disabled = false;
+  if (s.lastError) {
+    snapshotStatusEl.textContent = `last save failed: ${s.lastError}`;
+    snapshotStatusEl.className = 'status err';
+    return;
+  }
+  if (!s.lastSavedAt) {
+    snapshotStatusEl.textContent = `no snapshot yet · cadence ${s.everyTicks} ticks`;
+    snapshotStatusEl.className = 'status';
+    return;
+  }
+  const tick = s.lastTickIndex ?? 0;
+  const dur = s.lastDurationMs ?? 0;
+  const suffix = s.inFlight ? ' · writing…' : '';
+  snapshotStatusEl.textContent = `last snapshot: ${fmtRelative(s.lastSavedAt)} · ticks=${tick} · ${dur}ms${suffix}`;
+  snapshotStatusEl.className = 'status ok';
+}
+
+async function fetchSnapshotStatus(): Promise<void> {
+  try {
+    const headers: Record<string, string> = {};
+    const token = adminTokenEl.value.trim();
+    if (token) headers['x-admin-token'] = token;
+    const res = await fetch('/api/admin/snapshot/status', { headers });
+    if (!res.ok) return;
+    const data = (await res.json()) as { status: SnapshotStatusPayload | null };
+    renderSnapshotStatus(data.status);
+  } catch {
+    // non-fatal; the periodic tick will retry
+  }
+}
+
+snapshotSaveBtn.addEventListener('click', () => {
+  void (async () => {
+    snapshotActionStatusEl.textContent = 'saving…';
+    snapshotActionStatusEl.className = 'status';
+    snapshotSaveBtn.disabled = true;
+    try {
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      const token = adminTokenEl.value.trim();
+      if (token) headers['x-admin-token'] = token;
+      const res = await fetch('/api/admin/snapshot/save', { method: 'POST', headers });
+      const raw = await res.text();
+      let parsed: { error?: string; status?: SnapshotStatusPayload } = {};
+      try {
+        parsed = raw ? JSON.parse(raw) : {};
+      } catch {
+        /* ignore */
+      }
+      if (!res.ok) {
+        snapshotActionStatusEl.textContent = `✗ ${res.status} ${parsed.error ?? raw.slice(0, 80)}`;
+        snapshotActionStatusEl.className = 'status err';
+        return;
+      }
+      snapshotActionStatusEl.textContent = '✓ saved';
+      snapshotActionStatusEl.className = 'status ok';
+      if (parsed.status) renderSnapshotStatus(parsed.status);
+    } catch (err) {
+      snapshotActionStatusEl.textContent = `✗ ${(err as Error).message}`;
+      snapshotActionStatusEl.className = 'status err';
+    } finally {
+      snapshotSaveBtn.disabled = false;
+    }
+  })();
+});
+
+// Poll periodically so the status line stays fresh even when nothing else updates.
+setInterval(() => void fetchSnapshotStatus(), 15_000);
+
 async function bootstrap(): Promise<void> {
   try {
     const res = await fetch('/api/admin/bootstrap');
     if (!res.ok) throw new Error(`bootstrap http ${res.status}`);
     const data = (await res.json()) as BootstrapPayload;
     applyBootstrap(data);
+    renderSnapshotStatus(data.snapshotStatus);
   } catch (err) {
     console.warn('[admin] bootstrap failed', err);
   }

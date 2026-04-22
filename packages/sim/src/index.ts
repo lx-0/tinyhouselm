@@ -83,6 +83,8 @@ export type {
   CloseReason,
 } from './conversation.js';
 export { Runtime } from './runtime.js';
+export type { WorldStateSnapshot, WorldStateAgentSnapshot } from '@tina/shared';
+export { WORLD_STATE_SNAPSHOT_VERSION } from '@tina/shared';
 export type {
   RuntimeOptions,
   RuntimeAgent,

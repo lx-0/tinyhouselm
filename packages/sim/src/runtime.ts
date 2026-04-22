@@ -1,13 +1,15 @@
-import type {
-  AgentAction,
-  AgentMood,
-  ConversationTurn,
-  Delta,
-  InterventionKind,
-  PlanContext,
-  SimTime,
-  Vec2,
-  WorldObject,
+import {
+  type AgentAction,
+  type AgentMood,
+  type ConversationTurn,
+  type Delta,
+  type InterventionKind,
+  type PlanContext,
+  type SimTime,
+  type Vec2,
+  WORLD_STATE_SNAPSHOT_VERSION,
+  type WorldObject,
+  type WorldStateSnapshot,
 } from '@tina/shared';
 import { Agent, type AgentState } from './agent.js';
 import { SimulationClock } from './clock.js';
@@ -210,12 +212,12 @@ export interface InterventionDropResult extends InterventionResult {
 export class Runtime {
   readonly world: World;
   readonly clock: SimulationClock;
+  readonly seed: number;
   private readonly policy: HeartbeatPolicy;
   private readonly tickMs: number;
   private readonly perceptionRadius: number;
   private readonly speechRadius: number;
   private readonly speechTtlMs: number;
-  private readonly seed: number;
   private onEventCb?: (event: RuntimeEvent) => void;
   private readonly agents: Agent[] = [];
   private readonly memories = new Map<string, ParaMemory>();
@@ -248,8 +250,12 @@ export class Runtime {
    */
   private readonly persistPromises = new Set<Promise<void>>();
   private readonly recallLimit: number;
-  private tickIndex = 0;
+  private _tickIndex = 0;
   private flushInFlight: Promise<void> | null = null;
+
+  get tickIndex(): number {
+    return this._tickIndex;
+  }
 
   constructor(opts: RuntimeOptions) {
     this.tickMs = opts.tickMs ?? 100;
@@ -410,7 +416,7 @@ export class Runtime {
     }
 
     this.sweepConversations(tick, simTime);
-    this.tickIndex += 1;
+    this._tickIndex += 1;
     this.telemetry.setActiveConversations(this.conversations.activeCount());
     this.telemetry.recordTickDuration(performance.now() - tickStart);
     if (this.memoryFlushEveryTicks > 0 && this.tickIndex % this.memoryFlushEveryTicks === 0) {
@@ -1195,6 +1201,84 @@ export class Runtime {
       }
     })();
     this.reflectionPromises.set(agentId, promise);
+  }
+
+  /**
+   * Serialize the live runtime state for durable save/resume. Static config
+   * (tilemap, zones, personas) is NOT included — those are reloaded from
+   * source on boot.
+   */
+  toStateSnapshot(): WorldStateSnapshot {
+    return {
+      version: WORLD_STATE_SNAPSHOT_VERSION,
+      savedAt: new Date().toISOString(),
+      seed: this.seed,
+      tickIndex: this.tickIndex,
+      interventionSeq: this.interventionSeq,
+      clock: {
+        simTime: this.clock.simTime,
+        ticks: this.clock.ticks,
+        speed: this.clock.speed,
+      },
+      world: {
+        width: this.world.width,
+        height: this.world.height,
+        objects: this.world.listObjects().map((o) => ({ ...o, pos: { ...o.pos } })),
+      },
+      agents: this.agents.map((a) => ({
+        id: a.def.id,
+        position: { ...a.state.position },
+        facing: a.state.facing,
+        currentAction: a.state.currentAction,
+        zone: a.state.zone,
+      })),
+    };
+  }
+
+  /**
+   * Apply a previously-saved snapshot. Must be called before the first tick —
+   * the underlying clock refuses to be rewound once it has advanced.
+   *
+   * Validates schema version + world dimensions. On any mismatch, throws so
+   * the caller can log + fall back to cold start rather than silently land
+   * agents in the wrong town.
+   */
+  restoreStateSnapshot(snap: WorldStateSnapshot): void {
+    if (snap.version !== WORLD_STATE_SNAPSHOT_VERSION) {
+      throw new Error(
+        `snapshot version ${snap.version} != current ${WORLD_STATE_SNAPSHOT_VERSION}`,
+      );
+    }
+    if (snap.world.width !== this.world.width || snap.world.height !== this.world.height) {
+      throw new Error(
+        `snapshot dims ${snap.world.width}x${snap.world.height} != runtime ${this.world.width}x${this.world.height}`,
+      );
+    }
+    if (this.tickIndex !== 0) {
+      throw new Error('Runtime.restoreStateSnapshot() called after ticks have advanced');
+    }
+    this.clock.restore({
+      simTime: snap.clock.simTime,
+      ticks: snap.clock.ticks,
+      speed: snap.clock.speed,
+    });
+    this._tickIndex = snap.tickIndex;
+    this.interventionSeq = snap.interventionSeq;
+    this.world.restoreObjects(snap.world.objects);
+    const byId = new Map(snap.agents.map((a) => [a.id, a]));
+    for (const agent of this.agents) {
+      const saved = byId.get(agent.def.id);
+      if (!saved) continue;
+      agent.state.position = { ...saved.position };
+      agent.state.facing = saved.facing;
+      agent.state.currentAction = saved.currentAction;
+      agent.state.zone = saved.zone;
+      // Drop any cached routing — the next tick will replan from the new pos.
+      agent.state.gotoTarget = null;
+      agent.state.gotoLabel = null;
+      agent.state.path = [];
+      agent.state.pathPlannedAtTick = -1;
+    }
   }
 
   /** Test/support hook: wait for any in-flight reflections to finish. */

@@ -39,4 +39,19 @@ export class SimulationClock {
     this._ticks += 1;
     return simDelta;
   }
+
+  /**
+   * One-shot restore hook used by snapshot loading. Overwrites simTime / ticks
+   * / speed. Intended to be called exactly once, before the first `advance()`.
+   */
+  restore(state: { simTime: SimTime; ticks: number; speed?: number }): void {
+    if (this._ticks !== 0) {
+      throw new Error('SimulationClock.restore() called after ticks have advanced');
+    }
+    this._simTime = state.simTime;
+    this._ticks = state.ticks;
+    if (typeof state.speed === 'number' && Number.isFinite(state.speed)) {
+      this.speed = state.speed;
+    }
+  }
 }

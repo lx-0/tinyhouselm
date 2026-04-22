@@ -147,4 +147,13 @@ export class World {
     });
     return existing;
   }
+
+  /**
+   * Replace the entire object set silently (no deltas). Used by snapshot
+   * restore before any client has subscribed to the SSE stream.
+   */
+  restoreObjects(objects: WorldObject[]): void {
+    this.objects.clear();
+    for (const obj of objects) this.objects.set(obj.id, { ...obj, pos: { ...obj.pos } });
+  }
 }

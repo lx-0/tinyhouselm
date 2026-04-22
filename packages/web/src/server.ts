@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { type IncomingMessage, type ServerResponse, createServer } from 'node:http';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Delta, Vec2 } from '@tina/shared';
 import {
@@ -24,6 +24,12 @@ import { InterventionHandlers } from './intervention.js';
 import { log } from './logger.js';
 import { ObservabilityStore } from './observability.js';
 import { mergeReflectionOptions, resolveReflectionTunables } from './reflection-config.js';
+import {
+  type SnapshotScheduler,
+  type SnapshotStatus,
+  readSnapshot,
+  scheduleSnapshots,
+} from './snapshot-store.js';
 import { buildSnapshot } from './snapshot.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -41,8 +47,53 @@ const SIM_START_HOUR = Number(process.env.SIM_START_HOUR ?? 6);
 // How often to emit a structured telemetry heartbeat log line (ticks).
 const HEARTBEAT_LOG_TICKS = Number(process.env.HEARTBEAT_LOG_TICKS ?? 300);
 
+// Snapshot / resume configuration (TINA-24).
+const SIM_SNAPSHOT_ENABLED = (process.env.SIM_SNAPSHOT_ENABLED ?? 'true').toLowerCase() !== 'false';
+const SIM_SNAPSHOT_EVERY_TICKS = Number(process.env.SIM_SNAPSHOT_EVERY_TICKS ?? 300);
+const SIM_SNAPSHOT_DIR_ENV = process.env.SIM_SNAPSHOT_DIR ?? './data/snapshots';
+const SIM_SNAPSHOT_DIR = isAbsolute(SIM_SNAPSHOT_DIR_ENV)
+  ? SIM_SNAPSHOT_DIR_ENV
+  : resolve(process.cwd(), SIM_SNAPSHOT_DIR_ENV);
+
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
+}
+
+function timingSafeStrEq(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function headerFirst(h: string | string[] | undefined): string | null {
+  if (!h) return null;
+  return Array.isArray(h) ? (h[0] ?? null) : h;
+}
+
+function requestIp(req: IncomingMessage): string {
+  const forwarded = headerFirst(req.headers['x-forwarded-for']);
+  if (forwarded) return forwarded.split(',')[0]!.trim();
+  return req.socket.remoteAddress ?? '';
+}
+
+/**
+ * Shared admin gate for non-intervention routes. Same semantics as
+ * InterventionHandlers.checkAuth: token required when ADMIN_TOKEN is set,
+ * otherwise localhost-only.
+ */
+function checkAdmin(
+  req: IncomingMessage,
+  token: string | null,
+): { ok: true } | { ok: false; status: number; error: string } {
+  if (token) {
+    const provided = headerFirst(req.headers['x-admin-token']);
+    if (provided && timingSafeStrEq(provided, token)) return { ok: true };
+    return { ok: false, status: 401, error: 'admin token required' };
+  }
+  const ip = requestIp(req);
+  if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return { ok: true };
+  return { ok: false, status: 401, error: 'admin token required' };
 }
 
 async function bundleClient(entryFile: string): Promise<string> {
@@ -157,6 +208,43 @@ async function main(): Promise<void> {
 
   log.info('web.personas.loaded', { count: skills.length });
 
+  // Snapshot restore — before first tick, before SSE subscribers.
+  if (SIM_SNAPSHOT_ENABLED) {
+    const restored = await readSnapshot(SIM_SNAPSHOT_DIR, (level, event, fields) =>
+      log[level](event, fields),
+    );
+    if (restored) {
+      try {
+        runtime.restoreStateSnapshot(restored);
+        log.info('sim.snapshot.restore', {
+          dir: SIM_SNAPSHOT_DIR,
+          tickIndex: restored.tickIndex,
+          simTime: restored.clock.simTime,
+          savedAt: restored.savedAt,
+          ageMs: Date.now() - Date.parse(restored.savedAt),
+          objects: restored.world.objects.length,
+          agents: restored.agents.length,
+        });
+      } catch (err) {
+        log.error('sim.snapshot.restore.error', {
+          dir: SIM_SNAPSHOT_DIR,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      log.info('sim.snapshot.cold_start', { dir: SIM_SNAPSHOT_DIR });
+    }
+  }
+
+  const snapshotScheduler: SnapshotScheduler | null = SIM_SNAPSHOT_ENABLED
+    ? scheduleSnapshots({
+        dir: SIM_SNAPSHOT_DIR,
+        runtime,
+        everyTicks: SIM_SNAPSHOT_EVERY_TICKS,
+        log: (level, event, fields) => log[level](event, fields),
+      })
+    : null;
+
   let ready = false;
   const clients = new Set<ServerResponse>();
   const encoder = (msg: unknown) => `data: ${JSON.stringify(msg)}\n\n`;
@@ -261,6 +349,8 @@ async function main(): Promise<void> {
   const indexHtml = await readFile(resolve(PUBLIC_DIR, 'index.html'), 'utf8');
   const adminHtml = await readFile(resolve(PUBLIC_DIR, 'admin.html'), 'utf8');
 
+  const adminToken = process.env.ADMIN_TOKEN || null;
+
   const interventionHandlers = new InterventionHandlers({
     runtime,
     broadcast: (d) => broadcast(d),
@@ -268,8 +358,11 @@ async function main(): Promise<void> {
       budget.record(0, `admin:intervention:${kind}`);
       log.info('admin.intervention', { kind });
     },
-    adminToken: process.env.ADMIN_TOKEN || null,
+    adminToken,
   });
+
+  const snapshotStatus = (): SnapshotStatus | null =>
+    snapshotScheduler ? snapshotScheduler.status() : null;
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
@@ -307,9 +400,43 @@ async function main(): Promise<void> {
       res.end(
         JSON.stringify({
           snapshot: buildSnapshot(world, runtime),
+          snapshotStatus: snapshotStatus(),
           ...observability.bootstrap(),
         }),
       );
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/admin/snapshot/status') {
+      const auth = checkAdmin(req, adminToken);
+      if (!auth.ok) {
+        res.writeHead(auth.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: auth.error }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, status: snapshotStatus() }));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/admin/snapshot/save') {
+      const auth = checkAdmin(req, adminToken);
+      if (!auth.ok) {
+        res.writeHead(auth.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: auth.error }));
+        return;
+      }
+      if (!snapshotScheduler) {
+        res.writeHead(409, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'snapshots disabled' }));
+        return;
+      }
+      try {
+        await snapshotScheduler.forceSave();
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, status: snapshotScheduler.status() }));
+      } catch (err) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+      }
       return;
     }
     if (req.method === 'GET' && url.pathname === '/stream') {
@@ -383,6 +510,7 @@ async function main(): Promise<void> {
         const endDeltas: Delta[] = world.drainDeltas();
         const all: Delta[] = [...startDeltas, ...endDeltas];
         for (const d of all) broadcast(d);
+        snapshotScheduler?.notifyTick();
         const t = runtime.telemetrySnapshot();
         if (HEARTBEAT_LOG_TICKS > 0 && t.ticks % HEARTBEAT_LOG_TICKS === 0) {
           log.info('sim.heartbeat', {
@@ -410,7 +538,22 @@ async function main(): Promise<void> {
     ready = false;
     clearInterval(tickTimer);
     for (const res of clients) res.end();
-    void runtime.flushConversations();
+    void (async () => {
+      try {
+        await runtime.flushConversations();
+      } catch (err) {
+        log.error('web.shutdown.flush.error', { err });
+      }
+      if (snapshotScheduler) {
+        try {
+          await snapshotScheduler.forceSave();
+          log.info('sim.snapshot.shutdown_save', { status: snapshotScheduler.status() });
+        } catch (err) {
+          log.error('sim.snapshot.shutdown_save.error', { err });
+        }
+        snapshotScheduler.dispose();
+      }
+    })();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
   };

@@ -200,3 +200,33 @@ export type Delta =
     };
 
 export type StreamMessage = Snapshot | Delta;
+
+/** Current save file schema version. Bump on any incompatible field change. */
+export const WORLD_STATE_SNAPSHOT_VERSION = 1;
+
+export type WorldStateAgentSnapshot = {
+  id: string;
+  position: Vec2;
+  facing: 'N' | 'S' | 'E' | 'W';
+  currentAction: string;
+  zone: string | null;
+};
+
+export type WorldStateSnapshot = {
+  version: number;
+  savedAt: string;
+  seed: number;
+  tickIndex: number;
+  interventionSeq: number;
+  clock: {
+    simTime: SimTime;
+    ticks: number;
+    speed: number;
+  };
+  world: {
+    width: number;
+    height: number;
+    objects: WorldObject[];
+  };
+  agents: WorldStateAgentSnapshot[];
+};
