@@ -2,13 +2,16 @@ import { readFile } from 'node:fs/promises';
 import { type IncomingMessage, type ServerResponse, createServer } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Delta, Zone } from '@tina/shared';
+import type { Delta, Vec2 } from '@tina/shared';
 import {
   ParaMemory,
   Runtime,
   SimulationClock,
   World,
+  buildStarterTown,
+  homeForAgent,
   loadAllSkills,
+  nearestWalkable,
   seededRng,
   skillDirectory,
 } from '@tina/sim';
@@ -21,24 +24,12 @@ const PACKAGE_ROOT = resolve(__dirname, '..');
 const PUBLIC_DIR = resolve(PACKAGE_ROOT, 'public');
 
 const PORT = Number(process.env.PORT ?? 5173);
-const WORLD_W = Number(process.env.WORLD_W ?? 24);
-const WORLD_H = Number(process.env.WORLD_H ?? 24);
 const SEED = Number(process.env.SEED ?? 42);
 const TICK_MS = Number(process.env.TICK_MS ?? 200);
 const SIM_SPEED = Number(process.env.SIM_SPEED ?? 30);
 // Starting wall-clock hour of day for the simulation (e.g. 6 = boot at 06:00).
 // Defaults to 6am so demos open on morning routines rather than midnight.
 const SIM_START_HOUR = Number(process.env.SIM_START_HOUR ?? 6);
-
-function defaultZones(width: number, height: number): Zone[] {
-  const zw = Math.max(4, Math.floor(width / 4));
-  const zh = Math.max(4, Math.floor(height / 4));
-  return [
-    { name: 'cafe', x: 1, y: 1, width: zw, height: zh },
-    { name: 'park', x: width - zw - 1, y: 1, width: zw, height: zh },
-    { name: 'home', x: Math.floor(width / 2 - zw / 2), y: height - zh - 1, width: zw, height: zh },
-  ];
-}
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
@@ -70,11 +61,7 @@ async function main(): Promise<void> {
     throw new Error(`no personas found under ${agentsDir}`);
   }
 
-  const zones = defaultZones(WORLD_W, WORLD_H);
-  const anchors = zones.map((z) => ({
-    x: Math.floor(z.x + z.width / 2),
-    y: Math.floor(z.y + z.height / 2),
-  }));
+  const tileMap = buildStarterTown();
   const positionRng = seededRng(`positions:${SEED}`);
 
   const clock = new SimulationClock({
@@ -83,22 +70,23 @@ async function main(): Promise<void> {
     tickHz: 1000 / TICK_MS,
     startSimTime: SIM_START_HOUR * 3600,
   });
-  const world = new World({ width: WORLD_W, height: WORLD_H, clock, zones });
+  const world = new World({ width: tileMap.width, height: tileMap.height, clock, tileMap });
 
-  const runtimeAgents = skills.map((skill, i) => {
-    const anchor = anchors[i % anchors.length]!;
+  const runtimeAgents = skills.map((skill) => {
+    const home = homeForAgent(tileMap, skill.id);
+    const baseAnchor: Vec2 = home?.anchor ?? { x: 1, y: 1 };
+    const candidate: Vec2 = {
+      x: clamp(baseAnchor.x + Math.floor(positionRng() * 3) - 1, 0, world.width - 1),
+      y: clamp(baseAnchor.y + Math.floor(positionRng() * 3) - 1, 0, world.height - 1),
+    };
+    const safe = nearestWalkable(tileMap, candidate, 6) ?? baseAnchor;
     return {
       skill,
       memory: new ParaMemory({
         root: `${skillDirectory(skill)}/memory`,
         flushMode: 'deferred',
       }),
-      initial: {
-        position: {
-          x: clamp(anchor.x + Math.floor(positionRng() * 5) - 2, 0, WORLD_W - 1),
-          y: clamp(anchor.y + Math.floor(positionRng() * 5) - 2, 0, WORLD_H - 1),
-        },
-      },
+      initial: { position: { ...safe } },
     };
   });
 

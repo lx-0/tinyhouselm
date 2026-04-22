@@ -1,12 +1,22 @@
-import { type Delta, type SimTime, type Vec2, type Zone, deriveWorldClock } from '@tina/shared';
+import {
+  type Delta,
+  type Location,
+  type SimTime,
+  type TileMap,
+  type Vec2,
+  type Zone,
+  deriveWorldClock,
+} from '@tina/shared';
 import type { Agent } from './agent.js';
 import { SimulationClock } from './clock.js';
+import { isWalkable } from './tilemap.js';
 
 export interface WorldOptions {
   width: number;
   height: number;
   clock?: SimulationClock;
   zones?: Zone[];
+  tileMap?: TileMap;
 }
 
 export class World {
@@ -14,14 +24,27 @@ export class World {
   readonly height: number;
   readonly clock: SimulationClock;
   readonly zones: Zone[];
+  readonly tileMap: TileMap | null;
   private agents: Map<string, Agent> = new Map();
   private deltas: Delta[] = [];
 
   constructor(opts: WorldOptions) {
-    this.width = opts.width;
-    this.height = opts.height;
+    if (opts.tileMap) {
+      this.tileMap = opts.tileMap;
+      this.width = opts.tileMap.width;
+      this.height = opts.tileMap.height;
+      this.zones = opts.zones ? [...opts.zones] : [...opts.tileMap.areas];
+    } else {
+      this.tileMap = null;
+      this.width = opts.width;
+      this.height = opts.height;
+      this.zones = opts.zones ? [...opts.zones] : [];
+    }
     this.clock = opts.clock ?? new SimulationClock();
-    this.zones = opts.zones ? [...opts.zones] : [];
+  }
+
+  get locations(): Location[] {
+    return this.tileMap ? [...this.tileMap.locations] : [];
   }
 
   addAgent(agent: Agent): void {
@@ -82,5 +105,16 @@ export class World {
       x: Math.floor(zone.x + zone.width / 2),
       y: Math.floor(zone.y + zone.height / 2),
     };
+  }
+
+  /**
+   * True if a tile is walkable (or always true when no tilemap is loaded —
+   * keeps the bare-bones tests working without forcing every caller to ship a
+   * map).
+   */
+  walkableAt(x: number, y: number): boolean {
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return false;
+    if (!this.tileMap) return true;
+    return isWalkable(this.tileMap, x, y);
   }
 }

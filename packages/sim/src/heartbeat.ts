@@ -1,7 +1,7 @@
-import type { AgentAction, Vec2 } from '@tina/shared';
+import type { Affordance, AgentAction, Vec2 } from '@tina/shared';
 import type { ParaMemory } from './memory.js';
 import type { Perception } from './perception.js';
-import type { DayPlan, PlanBlock } from './plan.js';
+import type { DayPlan, PlanActivity, PlanBlock } from './plan.js';
 import { activeBlock, simHour } from './plan.js';
 import { type Rng, pick, seededRng } from './rng.js';
 import type { SkillDocument } from './skills.js';
@@ -215,11 +215,35 @@ function observationNote(perception: Perception, block: PlanBlock | null): strin
   return null;
 }
 
+function affordanceForActivity(activity: PlanActivity): Affordance | null {
+  switch (activity) {
+    case 'work':
+      return 'work';
+    case 'eat':
+      return 'food';
+    case 'rest':
+      return 'sleep';
+    case 'socialize':
+      return 'social';
+    case 'wander':
+      return 'leisure';
+  }
+}
+
 function planZoneTarget(
   block: PlanBlock,
   perception: Perception,
 ): { target: Vec2; label: string } | null {
   if (!block.preferredZone) return null;
+  // Prefer a location in the area whose affordance matches the activity.
+  const wantAff = affordanceForActivity(block.activity);
+  const inArea = perception.locations.filter((l) => l.area === block.preferredZone);
+  if (inArea.length > 0) {
+    const matching = wantAff ? inArea.find((l) => l.affordances.includes(wantAff)) : null;
+    const chosen = matching ?? inArea[0]!;
+    return { target: { ...chosen.anchor }, label: chosen.name };
+  }
+  // Fall back to the zone center for back-compat with mapless tests.
   const zone = perception.zones.find((z) => z.name === block.preferredZone);
   if (!zone) return null;
   return {

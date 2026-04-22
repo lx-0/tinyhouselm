@@ -36,7 +36,7 @@ export function dayPhaseForHour(hour: number): DayPhase {
 
 export type AgentAction =
   | { kind: 'move_to'; to: Vec2 }
-  | { kind: 'goto'; target: Vec2; label?: string }
+  | { kind: 'goto'; target: Vec2; label?: string; affordance?: Affordance }
   | { kind: 'speak'; to: string | null; text: string }
   | { kind: 'wait'; seconds: number }
   | { kind: 'remember'; fact: string }
@@ -54,6 +54,29 @@ export type AgentSnap = {
 
 export type Zone = { name: string; x: number; y: number; width: number; height: number };
 
+export type TileKind = 'grass' | 'path' | 'floor' | 'wall' | 'water' | 'door';
+
+export type Tile = { kind: TileKind; walkable: boolean };
+
+export type Affordance = 'sleep' | 'food' | 'coffee' | 'work' | 'leisure' | 'social';
+
+export type Location = {
+  id: string;
+  name: string;
+  area: string;
+  affordances: Affordance[];
+  anchor: Vec2;
+  footprint?: { x: number; y: number; width: number; height: number };
+};
+
+export type TileMap = {
+  width: number;
+  height: number;
+  tiles: Tile[];
+  locations: Location[];
+  areas: Zone[];
+};
+
 export type ConversationTurn = {
   speakerId: string;
   text: string;
@@ -65,7 +88,13 @@ export type Snapshot = {
   simTime: SimTime;
   speed: number;
   clock: WorldClock;
-  map: { width: number; height: number; tiles: number[]; zones: Zone[] };
+  map: {
+    width: number;
+    height: number;
+    tiles: Tile[];
+    zones: Zone[];
+    locations: Location[];
+  };
   agents: AgentSnap[];
 };
 

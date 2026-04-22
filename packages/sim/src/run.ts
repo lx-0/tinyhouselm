@@ -1,12 +1,14 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Zone } from '@tina/shared';
+import type { TileMap, Vec2 } from '@tina/shared';
 import { SimulationClock } from './clock.js';
 import { ParaMemory } from './memory.js';
 import { describeAction } from './perception.js';
 import { seededRng } from './rng.js';
 import { Runtime, type RuntimeEvent } from './runtime.js';
 import { type SkillDocument, loadAllSkills, loadSkill, skillDirectory } from './skills.js';
+import { homeForAgent, nearestWalkable } from './tilemap.js';
+import { buildStarterTown } from './town.js';
 import { World } from './world.js';
 
 interface CliOptions {
@@ -30,7 +32,9 @@ const DEFAULTS: CliOptions = {
   ticks: 60,
   tickMs: 100,
   seed: 42,
-  worldWidth: 24,
+  // World dimensions are taken from the starter town tilemap when present;
+  // these only matter for synthetic / mapless runs.
+  worldWidth: 32,
   worldHeight: 24,
   json: false,
   quiet: false,
@@ -127,21 +131,18 @@ async function loadSkills(opts: CliOptions): Promise<SkillDocument[]> {
   return loaded;
 }
 
-function defaultZones(width: number, height: number): Zone[] {
-  const w = Math.max(4, Math.floor(width / 4));
-  const h = Math.max(4, Math.floor(height / 4));
-  return [
-    { name: 'cafe', x: 1, y: 1, width: w, height: h },
-    { name: 'park', x: width - w - 1, y: 1, width: w, height: h },
-    { name: 'home', x: Math.floor(width / 2 - w / 2), y: height - h - 1, width: w, height: h },
-  ];
-}
-
-function zoneAnchors(zones: Zone[]): Array<{ x: number; y: number }> {
-  return zones.map((z) => ({
-    x: Math.floor(z.x + z.width / 2),
-    y: Math.floor(z.y + z.height / 2),
-  }));
+function spawnAnchorsFromMap(map: TileMap): Vec2[] {
+  // Spawn at the door of every home + the cafe entrance + the park bench so
+  // agents start scattered across the town instead of all on top of each other.
+  const anchors: Vec2[] = [];
+  for (const loc of map.locations) {
+    if (loc.affordances.includes('sleep') || loc.id === 'cafe.counter' || loc.id === 'park.bench') {
+      anchors.push(loc.anchor);
+    }
+  }
+  if (anchors.length === 0)
+    anchors.push({ x: Math.floor(map.width / 2), y: Math.floor(map.height / 2) });
+  return anchors;
 }
 
 function pad(n: number | string, width: number): string {
@@ -190,8 +191,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const zones = defaultZones(opts.worldWidth, opts.worldHeight);
-  const anchors = zoneAnchors(zones);
+  const tileMap = buildStarterTown();
   const positionRng = seededRng(`positions:${opts.seed}`);
 
   const clock = new SimulationClock({
@@ -199,14 +199,23 @@ async function main(): Promise<void> {
     speed: 60,
     tickHz: 1000 / opts.tickMs,
   });
-  const world = new World({ width: opts.worldWidth, height: opts.worldHeight, clock, zones });
+  const world = new World({ width: tileMap.width, height: tileMap.height, clock, tileMap });
+  const zones = world.zones;
+  const anchors = spawnAnchorsFromMap(tileMap);
 
-  const runtimeAgents = skills.map((skill, i) => {
-    const anchor = anchors[i % anchors.length]!;
+  const runtimeAgents = skills.map((skill) => {
+    const home = homeForAgent(tileMap, skill.id);
+    const baseAnchor = home?.anchor ??
+      anchors[Math.floor(positionRng() * anchors.length) % anchors.length] ?? { x: 1, y: 1 };
     const jitter = {
       x: Math.floor(positionRng() * 3) - 1,
       y: Math.floor(positionRng() * 3) - 1,
     };
+    const candidate: Vec2 = {
+      x: clamp(baseAnchor.x + jitter.x, 0, world.width - 1),
+      y: clamp(baseAnchor.y + jitter.y, 0, world.height - 1),
+    };
+    const safe = nearestWalkable(tileMap, candidate, 6) ?? baseAnchor;
     return {
       skill,
       memory: new ParaMemory({
@@ -214,10 +223,7 @@ async function main(): Promise<void> {
         flushMode: 'deferred',
       }),
       initial: {
-        position: {
-          x: clamp(anchor.x + jitter.x, 0, opts.worldWidth - 1),
-          y: clamp(anchor.y + jitter.y, 0, opts.worldHeight - 1),
-        },
+        position: { ...safe },
       },
     };
   });
@@ -244,7 +250,7 @@ async function main(): Promise<void> {
       `[tina] running ${skills.length} agents for ${opts.ticks} ticks @ ${opts.tickMs}ms/tick (seed=${opts.seed})`,
     );
     console.log(
-      `[tina] map ${opts.worldWidth}x${opts.worldHeight}  zones: ${zones.map((z) => z.name).join(', ')}  personas: ${skills.map((s) => s.id).join(', ')}`,
+      `[tina] map ${world.width}x${world.height}  zones: ${zones.map((z) => z.name).join(', ')}  locations: ${tileMap.locations.length}  personas: ${skills.map((s) => s.id).join(', ')}`,
     );
   }
 

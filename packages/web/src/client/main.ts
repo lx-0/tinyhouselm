@@ -2,8 +2,10 @@ import {
   type AgentSnap,
   type DayPhase,
   type Delta,
+  type Location,
   type Snapshot,
   type StreamMessage,
+  type Tile,
   type Vec2,
   type WorldClock,
   type Zone,
@@ -30,6 +32,8 @@ interface ViewState {
   width: number;
   height: number;
   zones: Zone[];
+  tiles: Tile[];
+  locations: Location[];
   agents: Map<string, AgentView>;
   conversations: Map<string, { participants: string[] }>;
   simTime: number;
@@ -43,6 +47,8 @@ const state: ViewState = {
   width: 0,
   height: 0,
   zones: [],
+  tiles: [],
+  locations: [],
   agents: new Map(),
   conversations: new Map(),
   simTime: 0,
@@ -115,6 +121,8 @@ function applySnapshot(snapshot: Snapshot): void {
   state.width = snapshot.map.width;
   state.height = snapshot.map.height;
   state.zones = snapshot.map.zones;
+  state.tiles = snapshot.map.tiles ?? [];
+  state.locations = snapshot.map.locations ?? [];
   state.speed = snapshot.speed;
   state.simTime = snapshot.simTime;
   state.clock = snapshot.clock ?? deriveWorldClock(snapshot.simTime, snapshot.speed);
@@ -186,18 +194,59 @@ function interpPos(a: AgentView): Vec2 {
   };
 }
 
-function zoneColor(name: string): string {
-  if (name === 'cafe') return 'rgba(220, 170, 100, 0.22)';
-  if (name === 'park') return 'rgba(96, 200, 128, 0.22)';
-  if (name === 'home') return 'rgba(220, 120, 170, 0.22)';
-  return 'rgba(180, 180, 220, 0.2)';
-}
-
 function zoneStroke(name: string): string {
   if (name === 'cafe') return 'rgba(220, 170, 100, 0.6)';
   if (name === 'park') return 'rgba(96, 200, 128, 0.6)';
   if (name === 'home') return 'rgba(220, 120, 170, 0.6)';
+  if (name === 'work') return 'rgba(150, 180, 230, 0.6)';
   return 'rgba(180, 180, 220, 0.5)';
+}
+
+function tileFill(kind: Tile['kind']): string {
+  switch (kind) {
+    case 'grass':
+      return '#243a2c';
+    case 'path':
+      return '#3d3326';
+    case 'floor':
+      return '#3a3550';
+    case 'wall':
+      return '#161320';
+    case 'water':
+      return '#1c3358';
+    case 'door':
+      return '#5a4a2a';
+  }
+}
+
+function tileShade(kind: Tile['kind']): string | null {
+  // Subtle 1-px highlight to give tiles a hand-pixeled feel.
+  switch (kind) {
+    case 'grass':
+      return 'rgba(255, 255, 255, 0.04)';
+    case 'path':
+      return 'rgba(255, 220, 170, 0.05)';
+    case 'floor':
+      return 'rgba(255, 255, 255, 0.06)';
+    case 'wall':
+      return 'rgba(255, 255, 255, 0.08)';
+    case 'water':
+      return 'rgba(180, 220, 255, 0.08)';
+    case 'door':
+      return 'rgba(255, 220, 160, 0.12)';
+    default:
+      return null;
+  }
+}
+
+function locationGlyph(loc: Location): string {
+  if (loc.affordances.includes('coffee')) return '☕';
+  if (loc.affordances.includes('food')) return '🍴';
+  if (loc.affordances.includes('work')) return '💼';
+  if (loc.affordances.includes('sleep')) return '🛏';
+  if (loc.affordances.includes('leisure')) return '🌳';
+  if (loc.affordances.includes('social')) return '✦';
+  return '•';
 }
 
 function roundRect(
@@ -270,30 +319,51 @@ function draw(): void {
   ctx.fillStyle = palette.base;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
-  ctx.lineWidth = 1;
-  for (let x = 0; x <= state.width; x++) {
-    ctx.beginPath();
-    ctx.moveTo(x * TILE + 0.5, 0);
-    ctx.lineTo(x * TILE + 0.5, state.height * TILE);
-    ctx.stroke();
-  }
-  for (let y = 0; y <= state.height; y++) {
-    ctx.beginPath();
-    ctx.moveTo(0, y * TILE + 0.5);
-    ctx.lineTo(state.width * TILE, y * TILE + 0.5);
-    ctx.stroke();
+  // Tilemap.
+  if (state.tiles.length === state.width * state.height) {
+    for (let y = 0; y < state.height; y++) {
+      for (let x = 0; x < state.width; x++) {
+        const t = state.tiles[y * state.width + x];
+        if (!t) continue;
+        ctx.fillStyle = tileFill(t.kind);
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+        const shade = tileShade(t.kind);
+        if (shade) {
+          ctx.fillStyle = shade;
+          // Top-left highlight pixel for a hand-pixeled feel.
+          ctx.fillRect(x * TILE, y * TILE, TILE, 1);
+          ctx.fillRect(x * TILE, y * TILE, 1, TILE);
+        }
+      }
+    }
   }
 
+  // Zone area outlines (so the cafe / park / home labels still float over the
+  // tiles for context — kept low-contrast so the tilemap reads as the world).
   for (const z of state.zones) {
-    ctx.fillStyle = zoneColor(z.name);
-    ctx.fillRect(z.x * TILE, z.y * TILE, z.width * TILE, z.height * TILE);
     ctx.strokeStyle = zoneStroke(z.name);
+    ctx.lineWidth = 1;
     ctx.strokeRect(z.x * TILE + 0.5, z.y * TILE + 0.5, z.width * TILE - 1, z.height * TILE - 1);
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
     ctx.font = '10px ui-monospace, Menlo, monospace';
-    ctx.fillText(z.name, z.x * TILE + 6, z.y * TILE + 14);
+    ctx.fillText(z.name, z.x * TILE + 4, z.y * TILE + 12);
   }
+
+  // Named locations — small glyphs at each anchor.
+  ctx.font = `${Math.floor(TILE * 0.7)}px ui-sans-serif, system-ui, "Apple Color Emoji", "Segoe UI Emoji"`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const loc of state.locations) {
+    const cx = loc.anchor.x * TILE + TILE / 2;
+    const cy = loc.anchor.y * TILE + TILE / 2;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+    ctx.beginPath();
+    ctx.arc(cx, cy + 1, TILE * 0.42, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillText(locationGlyph(loc), cx, cy);
+  }
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
 
   // conversation links
   ctx.strokeStyle = 'rgba(255, 240, 170, 0.4)';

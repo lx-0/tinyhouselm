@@ -72,3 +72,22 @@ export { TelemetryCollector } from './telemetry.js';
 export type { TelemetrySnapshot, TelemetryOptions } from './telemetry.js';
 export { seededRng, mulberry32, hashString, pick } from './rng.js';
 export type { Rng } from './rng.js';
+export {
+  blankMap,
+  fillRect,
+  homeForAgent,
+  isWalkable,
+  locationById,
+  locationsByAffordance,
+  locationsInArea,
+  makeTile,
+  nearestWalkable,
+  resolveLocation,
+  setTile,
+  strokeRect,
+  tileAt,
+  tileIndex,
+} from './tilemap.js';
+export { findPath } from './path.js';
+export type { Walkable, FindPathOptions } from './path.js';
+export { buildStarterTown } from './town.js';

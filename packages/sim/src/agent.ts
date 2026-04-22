@@ -16,6 +16,9 @@ export interface AgentState {
   gotoTarget: Vec2 | null;
   gotoLabel: string | null;
   zone: string | null;
+  path: Vec2[];
+  /** Tick the current cached path was computed at, for debugging / replan rate-limits. */
+  pathPlannedAtTick: number;
 }
 
 export class Agent {
@@ -32,6 +35,8 @@ export class Agent {
       gotoTarget: initial.gotoTarget ?? null,
       gotoLabel: initial.gotoLabel ?? null,
       zone: initial.zone ?? null,
+      path: initial.path ?? [],
+      pathPlannedAtTick: initial.pathPlannedAtTick ?? -1,
     };
   }
 
@@ -56,6 +61,9 @@ export class Agent {
       case 'goto':
         this.state.gotoTarget = { ...action.target };
         this.state.gotoLabel = action.label ?? null;
+        // Drop any stale cached path; the runtime will replan next tick.
+        this.state.path = [];
+        this.state.pathPlannedAtTick = -1;
         this.state.currentAction = action.label
           ? `heading to ${action.label}`
           : `heading to (${action.target.x},${action.target.y})`;

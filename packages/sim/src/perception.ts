@@ -1,4 +1,4 @@
-import type { AgentAction, AgentSnap, SimTime, Vec2, Zone } from '@tina/shared';
+import type { AgentAction, AgentSnap, Location, SimTime, Vec2, Zone } from '@tina/shared';
 import type { Agent } from './agent.js';
 import type { MemoryFact } from './memory.js';
 
@@ -21,6 +21,7 @@ export interface Perception {
   recentFacts: MemoryFact[];
   worldBounds: { width: number; height: number };
   zones: Zone[];
+  locations: Location[];
 }
 
 const DAY_SECONDS = 86400;

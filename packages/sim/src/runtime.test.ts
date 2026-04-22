@@ -8,6 +8,7 @@ import type { HeartbeatPolicy } from './heartbeat.js';
 import { ParaMemory } from './memory.js';
 import { Runtime, type RuntimeEvent } from './runtime.js';
 import { type SkillDocument, parseSkillSource } from './skills.js';
+import { blankMap, setTile } from './tilemap.js';
 import { World } from './world.js';
 
 const silentPolicy: HeartbeatPolicy = {
@@ -358,5 +359,53 @@ describe('Runtime', () => {
     expect(trace[0]).toEqual({ x: 3, y: 2 });
     expect(trace[4]).toEqual({ x: 7, y: 2 });
     expect(trace[5]).toEqual({ x: 7, y: 2 });
+  });
+
+  it('routes around a wall via A* without clipping', async () => {
+    // 5-wide world with a vertical wall at x=2, gap at the bottom row.
+    //   . . W . .
+    //   . . W . .
+    //   . . . . .   <- only y=2 is open through the wall column
+    const map = blankMap(5, 3, 'grass');
+    setTile(map, 2, 0, { kind: 'wall', walkable: false });
+    setTile(map, 2, 1, { kind: 'wall', walkable: false });
+    const root = await mkdtemp(join(tmpdir(), 'tina-path-'));
+    const world = new World({
+      width: map.width,
+      height: map.height,
+      tileMap: map,
+      clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
+    });
+    const runtime = new Runtime({
+      world,
+      policy: silentPolicy,
+      reflections: false,
+      memoryFlushEveryTicks: 0,
+      recallLimit: 0,
+      agents: [
+        {
+          skill: skillFor({ name: 'walker', description: 'quiet sedentary' }),
+          memory: new ParaMemory({ root, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 0, y: 0 }, gotoTarget: { x: 4, y: 0 } },
+        },
+      ],
+      seed: 1,
+      tickMs: 100,
+    });
+
+    const trace: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < 12; i++) {
+      await runtime.tickOnce();
+      const a = runtime.listAgents()[0]!;
+      trace.push({ ...a.state.position });
+      if (a.state.gotoTarget === null && a.state.position.x === 4) break;
+    }
+
+    const a = runtime.listAgents()[0]!;
+    expect(a.state.position).toEqual({ x: 4, y: 0 });
+    // Must never have stepped on the wall column above the bottom row.
+    for (const p of trace) {
+      if (p.x === 2) expect(p.y).toBe(2);
+    }
   });
 });

@@ -5,13 +5,8 @@ import { ConversationRegistry, type ConversationSession } from './conversation.j
 import type { HeartbeatPolicy } from './heartbeat.js';
 import { DefaultHeartbeatPolicy, makeRngForAgent } from './heartbeat.js';
 import type { MemoryFact, ParaMemory } from './memory.js';
-import {
-  type Perception,
-  chebyshevDistance,
-  nearbyAgents,
-  stepToward,
-  timeOfDay,
-} from './perception.js';
+import { findPath } from './path.js';
+import { type Perception, chebyshevDistance, nearbyAgents, timeOfDay } from './perception.js';
 import { type DayPlan, PlanRuntime } from './plan.js';
 import { ReflectionEngine, type ReflectionEngineOptions } from './reflection.js';
 import type { SkillDocument } from './skills.js';
@@ -395,31 +390,62 @@ export class Runtime {
     const target = agent.state.gotoTarget;
     if (!target) return;
     const pos = agent.state.position;
+    const label = agent.state.gotoLabel;
     if (pos.x === target.x && pos.y === target.y) {
       agent.state.gotoTarget = null;
       agent.state.gotoLabel = null;
-      agent.state.currentAction = agent.state.gotoLabel
-        ? `arrived at ${agent.state.gotoLabel}`
-        : 'idle';
+      agent.state.path = [];
+      agent.state.pathPlannedAtTick = -1;
+      agent.state.currentAction = label ? `arrived at ${label}` : 'idle';
       return;
     }
-    const next = stepToward(pos, target);
-    if (next.x === pos.x && next.y === pos.y) {
-      agent.state.gotoTarget = null;
-      agent.state.gotoLabel = null;
+
+    // (Re)plan the path if we don't have one cached. We also replan if the
+    // first step of the cached path is no longer adjacent to us — happens
+    // when something kicked the agent off-course.
+    let path = agent.state.path;
+    const head = path[0];
+    const headValid = head && Math.abs(head.x - pos.x) + Math.abs(head.y - pos.y) === 1;
+    const tail = path[path.length - 1];
+    const tailValid = tail && tail.x === target.x && tail.y === target.y;
+    if (path.length === 0 || !headValid || !tailValid) {
+      const planned = findPath(
+        pos,
+        target,
+        (x, y) => this.world.walkableAt(x, y),
+        { width: this.world.width, height: this.world.height },
+        { goalAlwaysReachable: true },
+      );
+      if (!planned || planned.length === 0) {
+        // No route — abandon the goto so the policy can pick something else.
+        agent.state.gotoTarget = null;
+        agent.state.gotoLabel = null;
+        agent.state.path = [];
+        agent.state.pathPlannedAtTick = -1;
+        agent.state.currentAction = label ? `gave up on ${label}` : 'idle';
+        return;
+      }
+      path = planned;
+      agent.state.path = path;
+      agent.state.pathPlannedAtTick = tick;
+    }
+
+    const next = path[0]!;
+    if (!this.world.walkableAt(next.x, next.y)) {
+      // Tile became impassable mid-route — drop the cache and try once more
+      // next tick.
+      agent.state.path = [];
       return;
     }
-    if (next.x < 0 || next.y < 0 || next.x >= this.world.width || next.y >= this.world.height) {
-      agent.state.gotoTarget = null;
-      agent.state.gotoLabel = null;
-      return;
-    }
+    agent.state.path = path.slice(1);
     const move: AgentAction = { kind: 'move_to', to: next };
     await this.applyAction(agent, move, tick, simTime);
     if (next.x === target.x && next.y === target.y) {
       agent.state.gotoTarget = null;
       agent.state.gotoLabel = null;
-      agent.state.currentAction = 'idle';
+      agent.state.path = [];
+      agent.state.pathPlannedAtTick = -1;
+      agent.state.currentAction = label ? `arrived at ${label}` : 'idle';
     }
   }
 
@@ -643,6 +669,7 @@ export class Runtime {
       recentFacts,
       worldBounds: { width: this.world.width, height: this.world.height },
       zones: [...this.world.zones],
+      locations: this.world.locations,
     };
   }
 
