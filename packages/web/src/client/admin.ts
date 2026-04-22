@@ -65,6 +65,15 @@ interface AgentView {
   mood: AgentMood;
   plan: PlanContext | null;
   recent: string[];
+  reflections: ReflectionView[];
+}
+
+interface ReflectionView {
+  id: string;
+  summary: string;
+  trigger: string;
+  sourceCount: number;
+  simTime: SimTime;
 }
 
 interface RelationEdge {
@@ -78,6 +87,7 @@ interface RelationEdge {
 const MAX_CONV_ROWS = 60;
 const MAX_RECENT_PER_AGENT = 5;
 const MAX_TRANSCRIPT_LINES = 20;
+const MAX_REFLECTIONS_PER_AGENT = 3;
 
 const state = {
   agents: new Map<string, AgentView>(),
@@ -130,6 +140,7 @@ function displayName(id: string): string {
 function mergeAgent(snap: AgentSnap): void {
   const existing = state.agents.get(snap.id);
   const recent = existing?.recent ?? [];
+  const reflections = existing?.reflections ?? [];
   state.agents.set(snap.id, {
     id: snap.id,
     name: snap.name,
@@ -138,6 +149,7 @@ function mergeAgent(snap: AgentSnap): void {
     mood: snap.mood ?? 'idle',
     plan: snap.plan ?? existing?.plan ?? null,
     recent,
+    reflections,
   });
 }
 
@@ -146,6 +158,16 @@ function pushAgentEvent(id: string, text: string): void {
   if (!a) return;
   a.recent.unshift(text);
   if (a.recent.length > MAX_RECENT_PER_AGENT) a.recent.length = MAX_RECENT_PER_AGENT;
+}
+
+function pushAgentReflection(id: string, r: ReflectionView): void {
+  const a = state.agents.get(id);
+  if (!a) return;
+  if (a.reflections.some((x) => x.id === r.id)) return;
+  a.reflections.unshift(r);
+  if (a.reflections.length > MAX_REFLECTIONS_PER_AGENT) {
+    a.reflections.length = MAX_REFLECTIONS_PER_AGENT;
+  }
 }
 
 function applyBootstrap(b: BootstrapPayload): void {
@@ -171,8 +193,18 @@ function applyBootstrap(b: BootstrapPayload): void {
   for (const p of b.planEvents) {
     pushAgentEvent(p.id, `${p.kind.replace('plan_', '')}: ${shortText(p.detail, 60)}`);
   }
-  for (const r of b.reflections) {
+  // Bootstrap delivers newest-first already; iterate in reverse so the
+  // per-agent `reflections` list ends up newest-first after unshift.
+  for (let i = b.reflections.length - 1; i >= 0; i--) {
+    const r = b.reflections[i]!;
     pushAgentEvent(r.id, `reflect: ${shortText(r.summary, 60)}`);
+    pushAgentReflection(r.id, {
+      id: r.reflectionId,
+      summary: r.summary,
+      trigger: r.trigger,
+      sourceCount: r.sourceCount,
+      simTime: r.simTime,
+    });
   }
   renderAll();
 }
@@ -257,6 +289,13 @@ function applyDelta(d: Delta): void {
     }
     case 'reflection': {
       pushAgentEvent(d.id, `reflect: ${shortText(d.summary, 60)}`);
+      pushAgentReflection(d.id, {
+        id: d.reflectionId,
+        summary: d.summary,
+        trigger: d.trigger,
+        sourceCount: d.sourceCount,
+        simTime: d.simTime,
+      });
       renderAgents();
       return;
     }
@@ -452,6 +491,26 @@ function renderAgents(): void {
       s.className = 'suspend';
       s.textContent = `paused: ${a.plan.suspendedReason}`;
       el.appendChild(s);
+    }
+
+    if (a.reflections.length > 0) {
+      const ref = document.createElement('div');
+      ref.className = 'reflections';
+      const header = document.createElement('div');
+      header.className = 'reflections-header';
+      header.textContent = `reflections (${a.reflections.length})`;
+      ref.appendChild(header);
+      for (const r of a.reflections) {
+        const bullet = document.createElement('div');
+        bullet.className = 'reflect-bullet';
+        const label = document.createElement('span');
+        label.className = 'reflect-tag';
+        label.textContent = `${r.trigger.replace('_', '·')} · ${r.sourceCount} facts`;
+        bullet.appendChild(label);
+        bullet.appendChild(document.createTextNode(` ${r.summary}`));
+        ref.appendChild(bullet);
+      }
+      el.appendChild(ref);
     }
 
     if (a.recent.length > 0) {
