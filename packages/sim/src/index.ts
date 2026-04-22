@@ -40,7 +40,14 @@ export {
   describeAction,
   stepToward,
 } from './perception.js';
-export type { Perception, TimeOfDay, HeardSpeech } from './perception.js';
+export type {
+  Perception,
+  TimeOfDay,
+  HeardSpeech,
+  ObservedEvent,
+  ObservedEventKind,
+  SpeechSource,
+} from './perception.js';
 export { DefaultHeartbeatPolicy, inferPersonaHints, makeRngForAgent } from './heartbeat.js';
 export type { HeartbeatPolicy, HeartbeatContext, PersonaHints } from './heartbeat.js';
 export {
@@ -74,7 +81,17 @@ export type {
   CloseReason,
 } from './conversation.js';
 export { Runtime } from './runtime.js';
-export type { RuntimeOptions, RuntimeAgent, RuntimeEvent } from './runtime.js';
+export type {
+  RuntimeOptions,
+  RuntimeAgent,
+  RuntimeEvent,
+  InterventionWhisperInput,
+  InterventionEventInput,
+  InterventionDropObjectInput,
+  InterventionRemoveObjectInput,
+  InterventionResult,
+  InterventionDropResult,
+} from './runtime.js';
 export { TelemetryCollector } from './telemetry.js';
 export type { TelemetrySnapshot, TelemetryOptions } from './telemetry.js';
 export { seededRng, mulberry32, hashString, pick } from './rng.js';

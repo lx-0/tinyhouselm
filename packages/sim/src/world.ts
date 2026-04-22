@@ -4,6 +4,7 @@ import {
   type SimTime,
   type TileMap,
   type Vec2,
+  type WorldObject,
   type Zone,
   deriveWorldClock,
 } from '@tina/shared';
@@ -27,6 +28,7 @@ export class World {
   readonly tileMap: TileMap | null;
   private agents: Map<string, Agent> = new Map();
   private deltas: Delta[] = [];
+  private readonly objects: Map<string, WorldObject> = new Map();
 
   constructor(opts: WorldOptions) {
     if (opts.tileMap) {
@@ -116,5 +118,33 @@ export class World {
     if (x < 0 || y < 0 || x >= this.width || y >= this.height) return false;
     if (!this.tileMap) return true;
     return isWalkable(this.tileMap, x, y);
+  }
+
+  listObjects(): WorldObject[] {
+    return [...this.objects.values()];
+  }
+
+  getObject(id: string): WorldObject | null {
+    return this.objects.get(id) ?? null;
+  }
+
+  addObject(obj: WorldObject): WorldObject {
+    const stored: WorldObject = { ...obj, zone: obj.zone ?? this.zoneAt(obj.pos) };
+    this.objects.set(stored.id, stored);
+    this.deltas.push({ kind: 'object_add', object: stored, simTime: this.simTime });
+    return stored;
+  }
+
+  removeObject(id: string): WorldObject | null {
+    const existing = this.objects.get(id);
+    if (!existing) return null;
+    this.objects.delete(id);
+    this.deltas.push({
+      kind: 'object_remove',
+      id: existing.id,
+      label: existing.label,
+      simTime: this.simTime,
+    });
+    return existing;
   }
 }

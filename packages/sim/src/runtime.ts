@@ -3,9 +3,11 @@ import type {
   AgentMood,
   ConversationTurn,
   Delta,
+  InterventionKind,
   PlanContext,
   SimTime,
   Vec2,
+  WorldObject,
 } from '@tina/shared';
 import { Agent, type AgentState } from './agent.js';
 import { SimulationClock } from './clock.js';
@@ -14,7 +16,14 @@ import type { HeartbeatPolicy } from './heartbeat.js';
 import { DefaultHeartbeatPolicy, makeRngForAgent } from './heartbeat.js';
 import type { MemoryFact, ParaMemory } from './memory.js';
 import { findPath } from './path.js';
-import { type Perception, chebyshevDistance, nearbyAgents, timeOfDay } from './perception.js';
+import {
+  type HeardSpeech,
+  type ObservedEvent,
+  type Perception,
+  chebyshevDistance,
+  nearbyAgents,
+  timeOfDay,
+} from './perception.js';
 import { type DayPlan, PlanRuntime, activeBlock, simHour } from './plan.js';
 import { ReflectionEngine, type ReflectionEngineOptions } from './reflection.js';
 import type { SkillDocument } from './skills.js';
@@ -116,6 +125,16 @@ export type RuntimeEvent =
       reflectionId: string;
       summary: string;
       sourceCount: number;
+    }
+  | {
+      kind: 'intervention';
+      tick: number;
+      simTime: SimTime;
+      type: InterventionKind;
+      summary: string;
+      target: string | null;
+      zone: string | null;
+      affected: string[];
     };
 
 interface Recent {
@@ -126,6 +145,50 @@ interface Recent {
     at: SimTime;
     expireAt: SimTime;
   }>;
+}
+
+interface PendingWhisper {
+  targetId: string;
+  heard: HeardSpeech;
+  expireAt: SimTime;
+}
+
+interface PendingObservation {
+  targetId: string;
+  observed: ObservedEvent;
+  expireAt: SimTime;
+}
+
+export interface InterventionWhisperInput {
+  agentId: string;
+  text: string;
+}
+
+export interface InterventionEventInput {
+  text: string;
+  zone?: string | null;
+  agentIds?: string[];
+}
+
+export interface InterventionDropObjectInput {
+  id?: string;
+  label: string;
+  pos?: Vec2;
+  zone?: string | null;
+}
+
+export interface InterventionRemoveObjectInput {
+  id: string;
+}
+
+export interface InterventionResult {
+  simTime: SimTime;
+  affected: string[];
+  summary: string;
+}
+
+export interface InterventionDropResult extends InterventionResult {
+  object: WorldObject;
 }
 
 export class Runtime {
@@ -142,6 +205,9 @@ export class Runtime {
   private readonly memories = new Map<string, ParaMemory>();
   private readonly skills = new Map<string, SkillDocument>();
   private readonly recent: Recent = { speech: [] };
+  private readonly pendingWhispers: PendingWhisper[] = [];
+  private readonly pendingObservations: PendingObservation[] = [];
+  private interventionSeq = 0;
   private readonly conversations: ConversationRegistry;
   private readonly memoryFlushEveryTicks: number;
   readonly telemetry: TelemetryCollector;
@@ -373,10 +439,16 @@ export class Runtime {
     simTime: SimTime,
   ): Promise<string | null> {
     const memory = this.memories.get(agent.def.id)!;
+
+    // Interventions fire independently of conversation suspend/resume: they
+    // push a plan_replan + memory fact, but leave the existing suspension
+    // state alone so they stack cleanly with a live conversation.
+    await this.handleInterventions(agent, perception, tick, simTime);
+
     const existing = this.planRuntime.suspension(agent.def.id);
 
-    const heardNearby = perception.recentSpeech.find((s) =>
-      perception.nearby.some((n) => n.id === s.speakerId),
+    const heardNearby = perception.recentSpeech.find(
+      (s) => s.source !== 'intervention' && perception.nearby.some((n) => n.id === s.speakerId),
     );
 
     if (!existing && heardNearby) {
@@ -424,6 +496,287 @@ export class Runtime {
     }
 
     return existing;
+  }
+
+  private async handleInterventions(
+    agent: Agent,
+    perception: Perception,
+    tick: number,
+    simTime: SimTime,
+  ): Promise<void> {
+    const memory = this.memories.get(agent.def.id)!;
+    for (const heard of perception.recentSpeech) {
+      if (heard.source !== 'intervention') continue;
+      const detail = `whisper: "${heard.text}"`;
+      await this.planRuntime.recordReplan({
+        agentId: agent.def.id,
+        memory,
+        simTime,
+        reason: 'whisper',
+        detail,
+      });
+      this.emit({
+        kind: 'plan_replan',
+        tick,
+        simTime,
+        agentId: agent.def.id,
+        reason: 'whisper',
+        detail,
+      });
+      const fact = await memory.addFact({
+        fact: heard.text,
+        category: 'observation',
+        importance: 6,
+        source: 'intervention:whisper',
+      });
+      this.reflectionEngines.get(agent.def.id)?.noteNewFact(fact);
+      await memory.appendDailyNote(`t=${simTime.toFixed(1)}s whisper: "${heard.text}"`);
+    }
+    for (const obs of perception.recentObservations) {
+      if (obs.source !== 'intervention') continue;
+      const reason = `intervention:${obs.kind}`;
+      await this.planRuntime.recordReplan({
+        agentId: agent.def.id,
+        memory,
+        simTime,
+        reason,
+        detail: obs.text,
+      });
+      this.emit({
+        kind: 'plan_replan',
+        tick,
+        simTime,
+        agentId: agent.def.id,
+        reason,
+        detail: obs.text,
+      });
+      const importance = obs.kind === 'world_event' ? 5 : 4;
+      const fact = await memory.addFact({
+        fact: obs.text,
+        category: 'observation',
+        importance,
+        source: `intervention:${obs.kind}`,
+      });
+      this.reflectionEngines.get(agent.def.id)?.noteNewFact(fact);
+      await memory.appendDailyNote(`t=${simTime.toFixed(1)}s ${obs.text}`);
+    }
+  }
+
+  /**
+   * Queue a whisper intervention for a single agent. Delivered on the next
+   * tick via perception.recentSpeech (source: intervention).
+   */
+  injectWhisper(input: InterventionWhisperInput): InterventionResult {
+    const text = (input.text ?? '').trim();
+    if (!text) throw new Error('whisper text must be non-empty');
+    const target = this.agents.find((a) => a.def.id === input.agentId);
+    if (!target) throw new Error(`unknown agent id: ${input.agentId}`);
+    const simTime = this.world.simTime;
+    const tick = this.tickIndex;
+    // Keep the whisper alive for a few ticks so it survives perception even
+    // if the agent doesn't run immediately.
+    const expireAt = simTime + Math.max(1, (this.speechTtlMs / 1000) * this.clock.speed);
+    this.pendingWhispers.push({
+      targetId: target.def.id,
+      heard: {
+        speakerId: 'intervention',
+        speakerName: 'viewer',
+        text,
+        at: simTime,
+        source: 'intervention',
+      },
+      expireAt,
+    });
+    this.emit({
+      kind: 'intervention',
+      tick,
+      simTime,
+      type: 'whisper',
+      summary: text,
+      target: target.def.id,
+      zone: null,
+      affected: [target.def.id],
+    });
+    this.world.emit({
+      kind: 'intervention',
+      type: 'whisper',
+      summary: text,
+      target: target.def.id,
+      zone: null,
+      affected: [target.def.id],
+      simTime,
+    });
+    return { simTime, affected: [target.def.id], summary: text };
+  }
+
+  /**
+   * Queue a world-event observation for every agent in `zone` (or the agents
+   * named in `agentIds`, or all agents). Delivered on the next tick via
+   * perception.recentObservations (source: intervention, kind: world_event).
+   */
+  injectWorldEvent(input: InterventionEventInput): InterventionResult {
+    const text = (input.text ?? '').trim();
+    if (!text) throw new Error('event text must be non-empty');
+    const zone = input.zone ?? null;
+    const affected: string[] = [];
+    const targetIds = input.agentIds && input.agentIds.length > 0 ? new Set(input.agentIds) : null;
+    for (const agent of this.agents) {
+      if (targetIds && !targetIds.has(agent.def.id)) continue;
+      if (zone && this.world.zoneAt(agent.state.position) !== zone) continue;
+      affected.push(agent.def.id);
+    }
+    const simTime = this.world.simTime;
+    const tick = this.tickIndex;
+    const expireAt = simTime + Math.max(1, (this.speechTtlMs / 1000) * this.clock.speed);
+    for (const id of affected) {
+      this.pendingObservations.push({
+        targetId: id,
+        observed: { kind: 'world_event', source: 'intervention', text, zone, at: simTime },
+        expireAt,
+      });
+    }
+    this.emit({
+      kind: 'intervention',
+      tick,
+      simTime,
+      type: 'world_event',
+      summary: text,
+      target: null,
+      zone,
+      affected,
+    });
+    this.world.emit({
+      kind: 'intervention',
+      type: 'world_event',
+      summary: text,
+      target: null,
+      zone,
+      affected,
+      simTime,
+    });
+    return { simTime, affected, summary: text };
+  }
+
+  /**
+   * Drop a new object into the world. Nearby agents (perception radius, or
+   * agents in the same zone if `zone` is set) get a world_event observation
+   * phrased as "noticed <label> appear".
+   */
+  dropObject(input: InterventionDropObjectInput): InterventionDropResult {
+    const label = (input.label ?? '').trim();
+    if (!label) throw new Error('object label must be non-empty');
+    const simTime = this.world.simTime;
+    const tick = this.tickIndex;
+    const id = input.id ?? this.nextInterventionId('obj');
+    if (this.world.getObject(id)) throw new Error(`object id already exists: ${id}`);
+    let pos = input.pos ?? null;
+    if (!pos && input.zone) {
+      pos = this.world.zoneCenter(input.zone);
+    }
+    if (!pos) {
+      pos = { x: Math.floor(this.world.width / 2), y: Math.floor(this.world.height / 2) };
+    }
+    const zone = input.zone ?? this.world.zoneAt(pos);
+    const object = this.world.addObject({
+      id,
+      label,
+      pos: { ...pos },
+      zone,
+      droppedAtSim: simTime,
+    });
+    const text = zone ? `a ${label} appeared at ${zone}` : `a ${label} appeared`;
+    const expireAt = simTime + Math.max(1, (this.speechTtlMs / 1000) * this.clock.speed);
+    const affected: string[] = [];
+    for (const agent of this.agents) {
+      const inZone = zone && this.world.zoneAt(agent.state.position) === zone;
+      const nearby = chebyshevDistance(agent.state.position, object.pos) <= this.perceptionRadius;
+      if (!inZone && !nearby) continue;
+      affected.push(agent.def.id);
+      this.pendingObservations.push({
+        targetId: agent.def.id,
+        observed: { kind: 'object_drop', source: 'intervention', text, zone, at: simTime },
+        expireAt,
+      });
+    }
+    this.emit({
+      kind: 'intervention',
+      tick,
+      simTime,
+      type: 'object_drop',
+      summary: text,
+      target: null,
+      zone,
+      affected,
+    });
+    this.world.emit({
+      kind: 'intervention',
+      type: 'object_drop',
+      summary: text,
+      target: null,
+      zone,
+      affected,
+      simTime,
+    });
+    return { simTime, affected, summary: text, object };
+  }
+
+  /**
+   * Remove an existing object. Agents previously near it (perception radius,
+   * or zone match) get an object_remove observation.
+   */
+  removeObject(input: InterventionRemoveObjectInput): InterventionResult {
+    const existing = this.world.getObject(input.id);
+    if (!existing) throw new Error(`unknown object id: ${input.id}`);
+    const simTime = this.world.simTime;
+    const tick = this.tickIndex;
+    const text = existing.zone
+      ? `the ${existing.label} at ${existing.zone} is gone`
+      : `the ${existing.label} is gone`;
+    const expireAt = simTime + Math.max(1, (this.speechTtlMs / 1000) * this.clock.speed);
+    const affected: string[] = [];
+    for (const agent of this.agents) {
+      const inZone = existing.zone && this.world.zoneAt(agent.state.position) === existing.zone;
+      const nearby = chebyshevDistance(agent.state.position, existing.pos) <= this.perceptionRadius;
+      if (!inZone && !nearby) continue;
+      affected.push(agent.def.id);
+      this.pendingObservations.push({
+        targetId: agent.def.id,
+        observed: {
+          kind: 'object_remove',
+          source: 'intervention',
+          text,
+          zone: existing.zone,
+          at: simTime,
+        },
+        expireAt,
+      });
+    }
+    this.world.removeObject(existing.id);
+    this.emit({
+      kind: 'intervention',
+      tick,
+      simTime,
+      type: 'object_remove',
+      summary: text,
+      target: null,
+      zone: existing.zone,
+      affected,
+    });
+    this.world.emit({
+      kind: 'intervention',
+      type: 'object_remove',
+      summary: text,
+      target: null,
+      zone: existing.zone,
+      affected,
+      simTime,
+    });
+    return { simTime, affected, summary: text };
+  }
+
+  private nextInterventionId(prefix: string): string {
+    this.interventionSeq += 1;
+    return `${prefix}-${this.tickIndex}-${this.interventionSeq}`;
   }
 
   private async stepGoto(agent: Agent, tick: number, simTime: SimTime): Promise<void> {
@@ -682,14 +1035,46 @@ export class Runtime {
     memory: ParaMemory,
   ): Promise<Perception> {
     const others = this.agents.filter((a) => a.def.id !== agent.def.id);
-    const recentSpeech = this.recent.speech
+    const now = this.world.simTime;
+    const naturalSpeech: HeardSpeech[] = this.recent.speech
       .filter((s) => s.speakerId !== agent.def.id)
       .filter((s) => {
         const speaker = this.agents.find((a) => a.def.id === s.speakerId);
         if (!speaker) return false;
         return chebyshevDistance(agent.state.position, speaker.state.position) <= this.speechRadius;
       })
-      .map((s) => ({ speakerId: s.speakerId, speakerName: s.speakerName, text: s.text, at: s.at }));
+      .map((s) => ({
+        speakerId: s.speakerId,
+        speakerName: s.speakerName,
+        text: s.text,
+        at: s.at,
+        source: 'natural' as const,
+      }));
+    // Drain any whisper interventions targeted at this agent. One-shot —
+    // buildPerception consumes them so a whisper lands on exactly one tick.
+    const whispers: HeardSpeech[] = [];
+    for (let i = this.pendingWhispers.length - 1; i >= 0; i--) {
+      const entry = this.pendingWhispers[i]!;
+      if (entry.expireAt < now) {
+        this.pendingWhispers.splice(i, 1);
+        continue;
+      }
+      if (entry.targetId !== agent.def.id) continue;
+      whispers.push(entry.heard);
+      this.pendingWhispers.splice(i, 1);
+    }
+    const recentObservations: ObservedEvent[] = [];
+    for (let i = this.pendingObservations.length - 1; i >= 0; i--) {
+      const entry = this.pendingObservations[i]!;
+      if (entry.expireAt < now) {
+        this.pendingObservations.splice(i, 1);
+        continue;
+      }
+      if (entry.targetId !== agent.def.id) continue;
+      recentObservations.push(entry.observed);
+      this.pendingObservations.splice(i, 1);
+    }
+    const recentSpeech = [...naturalSpeech, ...whispers];
     const nearby = nearbyAgents(agent, others, this.perceptionRadius);
     let recentFacts: MemoryFact[] = [];
     if (this.recallLimit > 0) {
@@ -707,6 +1092,7 @@ export class Runtime {
       nearby,
       recentSpeech,
       recentFacts,
+      recentObservations,
       worldBounds: { width: this.world.width, height: this.world.height },
       zones: [...this.world.zones],
       locations: this.world.locations,

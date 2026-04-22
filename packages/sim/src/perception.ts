@@ -4,10 +4,23 @@ import type { MemoryFact } from './memory.js';
 
 export type TimeOfDay = 'dawn' | 'morning' | 'midday' | 'afternoon' | 'evening' | 'night';
 
+export type SpeechSource = 'natural' | 'intervention';
+
 export interface HeardSpeech {
   speakerId: string;
   speakerName: string;
   text: string;
+  at: SimTime;
+  source?: SpeechSource;
+}
+
+export type ObservedEventKind = 'world_event' | 'object_drop' | 'object_remove';
+
+export interface ObservedEvent {
+  kind: ObservedEventKind;
+  source: 'intervention';
+  text: string;
+  zone: string | null;
   at: SimTime;
 }
 
@@ -19,6 +32,7 @@ export interface Perception {
   nearby: AgentSnap[];
   recentSpeech: HeardSpeech[];
   recentFacts: MemoryFact[];
+  recentObservations: ObservedEvent[];
   worldBounds: { width: number; height: number };
   zones: Zone[];
   locations: Location[];

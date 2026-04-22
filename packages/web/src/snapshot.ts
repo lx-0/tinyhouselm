@@ -16,6 +16,7 @@ export function buildSnapshot(world: World, runtime?: Runtime): Snapshot {
       tiles,
       zones: [...world.zones],
       locations: world.locations,
+      objects: world.listObjects(),
     },
     agents: world.listAgents().map((a) => {
       const snap = a.snapshot();
