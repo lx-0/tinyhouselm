@@ -1,6 +1,6 @@
 import type { SimTime, Zone } from '@tina/shared';
 import { inferPersonaHints } from './heartbeat.js';
-import type { ParaMemory } from './memory.js';
+import type { MemoryFact, ParaMemory } from './memory.js';
 import type { SkillDocument } from './skills.js';
 
 export type PlanActivity = 'work' | 'socialize' | 'rest' | 'wander' | 'eat';
@@ -42,6 +42,14 @@ export interface ReplanEntry {
   detail: string;
 }
 
+export interface CarriedReflection {
+  /** Reflection fact id (e.g. `mei-12`). */
+  id: string;
+  /** First 140 chars of the reflection text. */
+  text: string;
+  importance: number;
+}
+
 export interface DayPlan {
   day: number;
   generatedAt: SimTime;
@@ -51,6 +59,10 @@ export interface DayPlan {
   blocks: PlanBlock[];
   hourPlans: Record<string, HourPlan>;
   replanLog: ReplanEntry[];
+  /** Reflection bullets carried from prior days, surfaced in the plan prompt. */
+  carriedReflections: CarriedReflection[];
+  /** Zone keywords (`cafe`/`park`/`home`) the agent is steering away from. */
+  avoidances: string[];
 }
 
 const SECONDS_PER_DAY = 86400;
@@ -179,6 +191,12 @@ export interface GeneratePlanInput {
   zones: Zone[];
   day: number;
   simTime: SimTime;
+  /**
+   * Reflection bullets from prior days (typically the 2-3 most recent).
+   * They are carried into the plan summary and can shift the morning zone
+   * away from anything flagged as an avoidance pattern in the text.
+   */
+  reflections?: MemoryFact[];
 }
 
 export function generateDayPlan(input: GeneratePlanInput): DayPlan {
@@ -195,10 +213,29 @@ export function generateDayPlan(input: GeneratePlanInput): DayPlan {
   const lunchStart = 12;
   const lunchEnd = 13;
 
-  const morningZone = resolve(schedule.workZone ?? 'home');
-  const morningActivity: PlanActivity =
-    isWeekend && schedule.weekendMode !== 'same' ? 'rest' : schedule.workActivity;
-  const morningIntent =
+  const carriedReflections: CarriedReflection[] = (input.reflections ?? [])
+    .slice(-3)
+    .map((r) => ({ id: r.id, text: r.fact.slice(0, 140), importance: r.importance }));
+  const avoidances = extractZoneAvoidances(input.reflections ?? []);
+
+  // If the morning would normally put the agent in an avoided zone keyword,
+  // steer to a neutral alternative. Keeps the existing schedule archetype
+  // for everything else — only the morning block is shifted.
+  const morningKeyword: 'cafe' | 'park' | 'home' = pickMorningKeyword(
+    schedule.workZone ?? 'home',
+    avoidances,
+  );
+  const morningZone = resolve(morningKeyword);
+  const avoidanceApplied =
+    schedule.workZone !== null && morningKeyword !== schedule.workZone && avoidances.length > 0;
+  const morningActivity: PlanActivity = avoidanceApplied
+    ? morningKeyword === 'park'
+      ? 'wander'
+      : 'rest'
+    : isWeekend && schedule.weekendMode !== 'same'
+      ? 'rest'
+      : schedule.workActivity;
+  const baseMorningIntent =
     isWeekend && schedule.weekendMode !== 'same'
       ? `slow ${dayOfWeek === 5 ? 'saturday' : 'sunday'} morning at ${home ?? 'home'}`
       : morningActivity === 'work'
@@ -206,6 +243,9 @@ export function generateDayPlan(input: GeneratePlanInput): DayPlan {
         : morningActivity === 'wander'
           ? `play at ${morningZone ?? 'the park'} this morning`
           : `ease into the morning at ${home ?? 'home'}`;
+  const morningIntent = avoidanceApplied
+    ? `${baseMorningIntent} (steering clear of ${avoidances.join(', ')})`
+    : baseMorningIntent;
 
   const lunchZoneName = resolve(schedule.lunchZone);
   const afternoonActivity: PlanActivity =
@@ -294,7 +334,11 @@ export function generateDayPlan(input: GeneratePlanInput): DayPlan {
       ? 'sat'
       : 'sun'
     : (['mon', 'tue', 'wed', 'thu', 'fri'][dayOfWeek] ?? `d${dayOfWeek}`);
-  const summary = `${label} day ${day} (${dayLabel}): ${blocks.map((b) => b.intent).join(' → ')}`;
+  const baseSummary = `${label} day ${day} (${dayLabel}): ${blocks.map((b) => b.intent).join(' → ')}`;
+  const summary =
+    carriedReflections.length > 0
+      ? `${baseSummary} · carrying: "${carriedReflections[0]!.text}"`
+      : baseSummary;
 
   return {
     day,
@@ -305,6 +349,68 @@ export function generateDayPlan(input: GeneratePlanInput): DayPlan {
     blocks,
     hourPlans: {},
     replanLog: [],
+    carriedReflections,
+    avoidances,
+  };
+}
+
+/**
+ * Scan reflection text for avoidance or stress patterns tied to one of the
+ * canonical zone keywords. Returns the unique set of zones to steer clear
+ * of. Light-touch parsing — misses are fine, the default schedule still
+ * runs; the goal is to unblock the "barista avoids the cafe after anxious
+ * morning" case the issue calls out.
+ */
+export function extractZoneAvoidances(reflections: MemoryFact[]): string[] {
+  if (reflections.length === 0) return [];
+  const zones: Array<'cafe' | 'park' | 'home'> = ['cafe', 'park', 'home'];
+  // Order matters: "avoid" is a generic signal; the more specific phrases are
+  // cheaper false-positive-wise. We also look for proximity-based patterns
+  // ("anxious … cafe") instead of strict regex anchoring.
+  const triggerPhrases = [
+    'avoid',
+    'avoiding',
+    'anxious',
+    'anxiety',
+    'stressed',
+    'stressful',
+    'tense',
+    'uncomfortable',
+    'need space',
+    'skip',
+    'stay away',
+    'dread',
+  ];
+  const avoid = new Set<string>();
+  for (const r of reflections) {
+    const text = r.fact.toLowerCase();
+    const hasTrigger = triggerPhrases.some((p) => text.includes(p));
+    if (!hasTrigger) continue;
+    for (const z of zones) {
+      if (text.includes(z)) avoid.add(z);
+    }
+  }
+  return [...avoid];
+}
+
+function pickMorningKeyword(
+  preferred: 'cafe' | 'park' | 'home',
+  avoidances: string[],
+): 'cafe' | 'park' | 'home' {
+  if (!avoidances.includes(preferred)) return preferred;
+  const fallbackOrder: Array<'home' | 'park' | 'cafe'> = ['home', 'park', 'cafe'];
+  for (const k of fallbackOrder) {
+    if (k === preferred) continue;
+    if (!avoidances.includes(k)) return k;
+  }
+  return preferred;
+}
+
+function normalizePersistedPlan(plan: DayPlan): DayPlan {
+  return {
+    ...plan,
+    carriedReflections: plan.carriedReflections ?? [],
+    avoidances: plan.avoidances ?? [],
   };
 }
 
@@ -342,7 +448,16 @@ export function replanForSurprise(
   reason: string,
   detail: string,
 ): ReplanOutcome {
-  const entry: ReplanEntry = { at: simTime, reason, detail };
+  // Fold the most recent carried reflection into the replan detail so the
+  // entry records what the agent "knew" when it reacted to the surprise.
+  // Keeps the replan log prompt-ready for an LLM policy down the line.
+  const context =
+    plan.carriedReflections.length > 0 ? ` | reflect: ${plan.carriedReflections[0]!.text}` : '';
+  const entry: ReplanEntry = {
+    at: simTime,
+    reason,
+    detail: context ? `${detail}${context}` : detail,
+  };
   return {
     plan: { ...plan, replanLog: [...plan.replanLog, entry] },
     entry,
@@ -365,6 +480,8 @@ export class PlanRuntime {
     zones: Zone[];
     memory: ParaMemory;
     simTime: SimTime;
+    /** Max reflection facts to thread into plan context. Default 3. */
+    reflectionLimit?: number;
   }): Promise<{ plan: DayPlan; committed: boolean }> {
     const { agentId, persona, zones, memory, simTime } = args;
     const day = simDay(simTime);
@@ -374,7 +491,7 @@ export class PlanRuntime {
       this.loaded.add(agentId);
       const persisted = await memory.readPlanRaw(day);
       if (persisted && typeof persisted === 'object' && (persisted as DayPlan).day === day) {
-        plan = persisted as DayPlan;
+        plan = normalizePersistedPlan(persisted as DayPlan);
         this.plans.set(agentId, plan);
         return { plan, committed: false };
       }
@@ -382,7 +499,8 @@ export class PlanRuntime {
 
     if (plan && plan.day === day) return { plan, committed: false };
 
-    plan = generateDayPlan({ persona, zones, day, simTime });
+    const reflections = await memory.recentReflections(args.reflectionLimit ?? 3);
+    plan = generateDayPlan({ persona, zones, day, simTime, reflections });
     this.plans.set(agentId, plan);
     await memory.writePlanRaw(day, plan);
     return { plan, committed: true };

@@ -3,10 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Zone } from '@tina/shared';
 import { describe, expect, it } from 'vitest';
-import { ParaMemory } from './memory.js';
+import { type MemoryFact, ParaMemory } from './memory.js';
 import {
   PlanRuntime,
   activeBlock,
+  extractZoneAvoidances,
   generateDayPlan,
   inferPersonaSchedule,
   replanForSurprise,
@@ -194,6 +195,132 @@ describe('plan', () => {
     expect(morning.activity).toBe('rest');
     expect(afternoon.activity).toBe('socialize');
     expect(weekend.summary).toContain('sat');
+  });
+
+  it('extractZoneAvoidances pulls cafe/park/home from anxiety phrasing', () => {
+    const facts: MemoryFact[] = [
+      {
+        id: 'mei-7',
+        fact: 'I feel anxious around bruno-costa in the cafe during the morning rush',
+        category: 'reflection',
+        importance: 8,
+        timestamp: '2026-04-21',
+        source: 'reflection:day_rollover:day-1',
+        status: 'active',
+        superseded_by: null,
+        related_entities: ['bruno-costa'],
+        last_accessed: '2026-04-21',
+        access_count: 0,
+      },
+      {
+        id: 'mei-8',
+        fact: 'A quiet theme: I enjoy the park after lunch',
+        category: 'reflection',
+        importance: 7,
+        timestamp: '2026-04-21',
+        source: 'reflection:day_rollover:day-1',
+        status: 'active',
+        superseded_by: null,
+        related_entities: [],
+        last_accessed: '2026-04-21',
+        access_count: 0,
+      },
+    ];
+    const avoids = extractZoneAvoidances(facts);
+    expect(avoids).toContain('cafe');
+    expect(avoids).not.toContain('park');
+  });
+
+  it('barista reflection "anxious around cafe" steers morning out of the cafe', () => {
+    const barista = skillFor('mei', 'extrovert barista, opens the cafe at 6:30, chatty');
+    const plainPlan = generateDayPlan({ persona: barista, zones, day: 1, simTime: 86400 });
+    const morningPlain = plainPlan.blocks.find((b) => b.id === 'morning')!;
+    expect(morningPlain.preferredZone).toBe('cafe');
+
+    const reflections: MemoryFact[] = [
+      {
+        id: 'mei-12',
+        fact: 'I feel anxious around bruno-costa in the cafe during the morning rush',
+        category: 'reflection',
+        importance: 9,
+        timestamp: '2026-04-21',
+        source: 'reflection:day_rollover:day-1:llm',
+        status: 'active',
+        superseded_by: null,
+        related_entities: ['bruno-costa'],
+        last_accessed: '2026-04-21',
+        access_count: 0,
+        derived_from: ['mei-1', 'mei-2'],
+      },
+    ];
+    const reflectedPlan = generateDayPlan({
+      persona: barista,
+      zones,
+      day: 1,
+      simTime: 86400,
+      reflections,
+    });
+    const morning = reflectedPlan.blocks.find((b) => b.id === 'morning')!;
+    expect(morning.preferredZone).not.toBe('cafe');
+    expect(morning.intent).toContain('steering clear of cafe');
+    expect(reflectedPlan.avoidances).toContain('cafe');
+    expect(reflectedPlan.carriedReflections).toHaveLength(1);
+    expect(reflectedPlan.carriedReflections[0]!.id).toBe('mei-12');
+    expect(reflectedPlan.summary).toContain('carrying');
+  });
+
+  it('replanForSurprise folds the primary reflection into the entry detail', () => {
+    const persona = skillFor('mei', 'barista, cafe, social');
+    const reflections: MemoryFact[] = [
+      {
+        id: 'mei-20',
+        fact: 'anxious around bruno-costa in the cafe',
+        category: 'reflection',
+        importance: 9,
+        timestamp: '2026-04-21',
+        source: 'reflection:day_rollover:day-1',
+        status: 'active',
+        superseded_by: null,
+        related_entities: ['bruno-costa'],
+        last_accessed: '2026-04-21',
+        access_count: 0,
+      },
+    ];
+    const plan = generateDayPlan({ persona, zones, day: 1, simTime: 86400, reflections });
+    const { entry } = replanForSurprise(plan, 90000, 'conversation', 'heard bruno');
+    expect(entry.detail).toContain('heard bruno');
+    expect(entry.detail).toContain('reflect:');
+    expect(entry.detail).toContain('anxious');
+  });
+
+  it('PlanRuntime.ensurePlan pulls recent reflections from memory and carries them forward', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tina-plan-refl-'));
+    const memory = new ParaMemory({
+      root,
+      entity: 'mei',
+      now: () => new Date('2026-04-21T08:00:00Z'),
+    });
+    await memory.addFact({
+      fact: 'I feel anxious around bruno-costa in the cafe during the morning rush',
+      category: 'reflection',
+      importance: 9,
+      related_entities: ['bruno-costa'],
+    });
+    const planner = new PlanRuntime();
+    const persona = skillFor('mei', 'extrovert barista, opens the cafe at 6:30');
+
+    const out = await planner.ensurePlan({
+      agentId: 'mei',
+      persona,
+      zones,
+      memory,
+      simTime: 86400 + 6 * 3600, // day 1, 06:00
+    });
+    expect(out.committed).toBe(true);
+    expect(out.plan.carriedReflections.length).toBeGreaterThan(0);
+    expect(out.plan.avoidances).toContain('cafe');
+    const morning = out.plan.blocks.find((b) => b.id === 'morning')!;
+    expect(morning.preferredZone).not.toBe('cafe');
   });
 
   it('night-owl blocks cover the wrap-around sleep range', () => {
