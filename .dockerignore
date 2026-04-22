@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+**/tsconfig.tsbuildinfo
+.git
+.github
+.vscode
+.idea
+.DS_Store
+*.log
+coverage
+.vitest
+docs
+.claude
+.github

@@ -19,6 +19,7 @@
     "reflections-dump": "pnpm --filter @tina/sim reflections-dump",
     "reflections-demo": "pnpm --filter @tina/sim reflections-demo",
     "web": "pnpm --filter @tina/web web",
+    "start": "pnpm --filter @tina/web start",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b",

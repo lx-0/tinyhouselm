@@ -1,0 +1,21 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/ready"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+startCommand = "pnpm --filter @tina/web start"
+
+[deploy.envs]
+PORT = "8080"
+NODE_ENV = "production"
+LOG_LEVEL = "info"
+SIM_SPEED = "30"
+TICK_MS = "200"
+SEED = "42"
+SIM_START_HOUR = "6"
+LLM_BUDGET_USD = "5"
+HEARTBEAT_LOG_TICKS = "300"

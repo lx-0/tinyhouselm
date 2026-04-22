@@ -16,6 +16,8 @@ import {
   skillDirectory,
 } from '@tina/sim';
 import { build as esbuild } from 'esbuild';
+import { createBudget, resolveBudgetCap } from './budget.js';
+import { log } from './logger.js';
 import { buildSnapshot } from './snapshot.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -30,6 +32,8 @@ const SIM_SPEED = Number(process.env.SIM_SPEED ?? 30);
 // Starting wall-clock hour of day for the simulation (e.g. 6 = boot at 06:00).
 // Defaults to 6am so demos open on morning routines rather than midnight.
 const SIM_START_HOUR = Number(process.env.SIM_START_HOUR ?? 6);
+// How often to emit a structured telemetry heartbeat log line (ticks).
+const HEARTBEAT_LOG_TICKS = Number(process.env.HEARTBEAT_LOG_TICKS ?? 300);
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
@@ -53,6 +57,10 @@ async function bundleClient(): Promise<string> {
 }
 
 async function main(): Promise<void> {
+  const bootStart = performance.now();
+  const budget = createBudget(resolveBudgetCap());
+  log.info('web.boot.start', { port: PORT, seed: SEED, tickMs: TICK_MS, simSpeed: SIM_SPEED });
+
   const clientJs = await bundleClient();
 
   const agentsDir = resolve(REPO_ROOT, 'world', 'agents');
@@ -97,8 +105,9 @@ async function main(): Promise<void> {
     seed: SEED,
   });
 
-  console.log(`[web] loaded ${skills.length} personas: ${skills.map((s) => s.id).join(', ')}`);
+  log.info('web.personas.loaded', { count: skills.length });
 
+  let ready = false;
   const clients = new Set<ServerResponse>();
   const encoder = (msg: unknown) => `data: ${JSON.stringify(msg)}\n\n`;
   function broadcast(payload: unknown): void {
@@ -147,6 +156,8 @@ async function main(): Promise<void> {
       res.end(
         JSON.stringify({
           ok: true,
+          ready,
+          version: process.env.RAILWAY_GIT_COMMIT_SHA ?? 'dev',
           simTime: world.simTime,
           agents: world.listAgents().length,
           ticks: t.ticks,
@@ -158,17 +169,30 @@ async function main(): Promise<void> {
           actionsPerMinute: Math.round(t.actionsPerMinute),
           actions: t.actions,
           wallMs: Math.round(t.wallMs),
+          llmBudget: budget.state(),
         }),
       );
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/ready') {
+      res.writeHead(ready ? 200 : 503, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ready }));
       return;
     }
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
   });
 
+  server.on('error', (err) => log.error('web.server.error', { err }));
+
   server.listen(PORT, () => {
-    console.log(`[web] serving http://localhost:${PORT}`);
-    console.log(`[web] ticking every ${TICK_MS}ms at ${SIM_SPEED}× sim speed`);
+    ready = true;
+    log.info('web.listen', {
+      url: `http://localhost:${PORT}`,
+      bootMs: Math.round(performance.now() - bootStart),
+      personas: skills.length,
+      llmBudgetUsd: budget.state().capUsd,
+    });
   });
 
   let ticking = false;
@@ -181,26 +205,44 @@ async function main(): Promise<void> {
         const endDeltas: Delta[] = world.drainDeltas();
         const all: Delta[] = [...startDeltas, ...endDeltas];
         for (const d of all) broadcast(d);
+        const t = runtime.telemetrySnapshot();
+        if (HEARTBEAT_LOG_TICKS > 0 && t.ticks % HEARTBEAT_LOG_TICKS === 0) {
+          log.info('sim.heartbeat', {
+            ticks: t.ticks,
+            simTime: world.simTime,
+            agents: world.listAgents().length,
+            activeConversations: t.activeConversations,
+            conversationsPerMinute: Math.round(t.conversationsPerMinute),
+            actionsPerMinute: Math.round(t.actionsPerMinute),
+            tickMsP95: Math.round(t.tickDuration.p95 * 100) / 100,
+            sseClients: clients.size,
+            llm: budget.state(),
+          });
+        }
       } catch (err) {
-        console.error('[web] tick error', err);
+        log.error('sim.tick.error', { err });
       } finally {
         ticking = false;
       }
     })();
   }, TICK_MS);
 
-  const shutdown = () => {
+  const shutdown = (signal: string) => {
+    log.info('web.shutdown', { signal });
+    ready = false;
     clearInterval(tickTimer);
     for (const res of clients) res.end();
     void runtime.flushConversations();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('uncaughtException', (err) => log.error('process.uncaught', { err }));
+  process.on('unhandledRejection', (err) => log.error('process.unhandled_rejection', { err }));
 }
 
 main().catch((err) => {
-  console.error(err);
+  log.error('web.boot.fatal', { err });
   process.exit(1);
 });

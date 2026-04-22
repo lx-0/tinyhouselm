@@ -49,8 +49,9 @@ pnpm lint
   telemetry summary (tick latency p50/p95/p99, actions/min, conversations/min).
 - `pnpm web` boots an HTTP server that runs the simulation in-process and
   streams snapshots + deltas over Server-Sent Events to a canvas client.
-  `GET /health` returns live telemetry. Config via env: `PORT`, `SIM_SPEED`,
-  `TICK_MS`, `SEED`, `WORLD_W`, `WORLD_H`.
+  `GET /health` returns live telemetry; `GET /ready` is the liveness probe.
+  Config via env: `PORT`, `SIM_SPEED`, `TICK_MS`, `SEED`, `SIM_START_HOUR`,
+  `LLM_BUDGET_USD`, `HEARTBEAT_LOG_TICKS`, `LOG_LEVEL`.
 - `pnpm profile --agents N --ticks T` synthesizes N stub personas in a tmpdir
   and reports ms/tick percentiles — used to check that the runtime stays
   within the tick budget as the agent count grows.
@@ -64,6 +65,29 @@ See the [TINA-2 plan document](./docs/architecture.md) — or open the issue in 
 - Agents are `agentskills.io` directories. Memory is a per-agent para-memory tree.
 - The simulation publishes a typed event stream; renderers subscribe.
 
+## Deploy
+
+The repo ships a Dockerfile and `railway.toml` wired to the `@tina/web` server.
+
+- **Health:** `GET /health` returns structured telemetry (tick p95, actions/min,
+  conversations/min, LLM budget state). `GET /ready` is the 200/503 liveness
+  probe used by Railway's health check.
+- **Logs:** one JSON line per event on stdout/stderr. A `sim.heartbeat` line
+  is emitted every `HEARTBEAT_LOG_TICKS` ticks (default 300, ≈60s at 200ms).
+- **LLM cost cap:** `LLM_BUDGET_USD` (default `5`) wires a hard cap into the
+  web process for when an LLM-backed heartbeat policy lands. Exceeding 80% logs
+  a warning; exhaustion flips `llmBudget.exhausted` in `/health`.
+
+Deploy locally with Docker:
+
+```bash
+docker build -t tina .
+docker run --rm -p 8080:8080 tina
+open http://localhost:8080
+```
+
+Railway picks up `railway.toml` and the Dockerfile automatically.
+
 ## Milestones
 
 - `TINA-2` — architecture + bootstrap + hello-world tick loop ✅
@@ -71,3 +95,7 @@ See the [TINA-2 plan document](./docs/architecture.md) — or open the issue in 
 - `TINA-4` — zones + goto + agent-to-agent conversations (with both-sided memory) ✅
 - `TINA-5` — pixelated renderer ✅
 - `TINA-6` — 100+ personas, telemetry, optimization ✅
+- `TINA-7` — goals, plans, surprise-triggered replan ✅
+- `TINA-8` — day/night cycle + persona schedules ✅
+- `TINA-9` — reflections: memory consolidation + ranked recall ✅
+- `TINA-10` — tiled world v1: rooms, locations, A* pathfinding ✅
