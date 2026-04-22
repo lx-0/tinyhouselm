@@ -28,7 +28,7 @@ Goal: turn passive viewers into participants. Watching is a fishbowl; acting on 
 
 Ordered by impact. `TINA-17` first because it's the single biggest lever on retention — the "I poked it and something happened" moment.
 
-- `TINA-17` — **Viewer interventions (MVP).** From `/admin`: inject a world event, whisper to an agent, drop/remove an object. Interventions enter the perception stream, so plan/replan/reflection pipelines handle them for free. Admin gate + rate-limit only.
+- `TINA-17` — **Viewer interventions (MVP). ✅** From `/admin`: inject a world event, whisper to an agent, drop/remove an object. Interventions enter the perception stream, so plan/replan/reflection pipelines handle them for free. Admin gate + rate-limit only. Dropped objects render as `✨` glyphs on the pixelated world view.
 - `TINA-18` — **Save / resume world state.** Snapshot world + per-agent para-memory + plan state to disk; restore on boot. Unblocks long-running demos across deploys.
 - `TINA-19` — **Named characters.** Curated authored personas alongside procedural ones, so visitors have named entry points ("go find Mei"). Depends on `TINA-17` — intervention UI is how people actually find them.
 
