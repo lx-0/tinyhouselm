@@ -8,6 +8,8 @@ import type {
   Snapshot,
   StreamMessage,
   WorldClock,
+  WorldObject,
+  Zone,
 } from '@tina/shared';
 import { deriveWorldClock } from '@tina/shared';
 
@@ -93,6 +95,8 @@ const state = {
   agents: new Map<string, AgentView>(),
   conversations: new Map<string, ConversationRow>(),
   relations: new Map<string, RelationEdge>(),
+  objects: new Map<string, WorldObject>(),
+  zones: [] as Zone[],
   clock: deriveWorldClock(0, 1),
   connected: false,
   agentFilter: '',
@@ -174,6 +178,9 @@ function applyBootstrap(b: BootstrapPayload): void {
   state.clock = b.snapshot.clock;
   state.agents.clear();
   for (const snap of b.snapshot.agents) mergeAgent(snap);
+  state.zones = [...b.snapshot.map.zones];
+  state.objects.clear();
+  for (const o of b.snapshot.map.objects ?? []) state.objects.set(o.id, o);
   state.conversations.clear();
   for (const c of b.conversations) {
     state.conversations.set(c.sessionId, {
@@ -206,6 +213,7 @@ function applyBootstrap(b: BootstrapPayload): void {
       simTime: r.simTime,
     });
   }
+  refreshInterventionControls();
   renderAll();
 }
 
@@ -217,6 +225,7 @@ function applyDelta(d: Delta): void {
       return;
     case 'agent_spawn':
       mergeAgent(d.agent);
+      refreshInterventionControls();
       renderAgents();
       return;
     case 'agent_action': {
@@ -304,6 +313,27 @@ function applyDelta(d: Delta): void {
       if (!a) return;
       a.mood = d.mood;
       a.plan = d.plan;
+      renderAgents();
+      return;
+    }
+    case 'object_add': {
+      state.objects.set(d.object.id, d.object);
+      renderObjectList();
+      return;
+    }
+    case 'object_remove': {
+      state.objects.delete(d.id);
+      renderObjectList();
+      return;
+    }
+    case 'intervention': {
+      if (d.target) {
+        pushAgentEvent(d.target, `${d.type}: ${shortText(d.summary, 60)}`);
+      }
+      for (const id of d.affected) {
+        if (id === d.target) continue;
+        pushAgentEvent(id, `${d.type}: ${shortText(d.summary, 60)}`);
+      }
       renderAgents();
       return;
     }
@@ -587,6 +617,170 @@ function renderGraph(): void {
   graphEl.innerHTML = parts.join('');
 }
 
+const whisperAgentSel = document.getElementById('whisper-agent') as HTMLSelectElement;
+const whisperTextEl = document.getElementById('whisper-text') as HTMLInputElement;
+const whisperSendBtn = document.getElementById('whisper-send') as HTMLButtonElement;
+const whisperStatusEl = document.getElementById('whisper-status') as HTMLElement;
+const eventTextEl = document.getElementById('event-text') as HTMLInputElement;
+const eventZoneSel = document.getElementById('event-zone') as HTMLSelectElement;
+const eventSendBtn = document.getElementById('event-send') as HTMLButtonElement;
+const eventStatusEl = document.getElementById('event-status') as HTMLElement;
+const objectLabelEl = document.getElementById('object-label') as HTMLInputElement;
+const objectZoneSel = document.getElementById('object-zone') as HTMLSelectElement;
+const objectDropBtn = document.getElementById('object-drop') as HTMLButtonElement;
+const objectStatusEl = document.getElementById('object-status') as HTMLElement;
+const objectListEl = document.getElementById('object-list') as HTMLElement;
+const adminTokenEl = document.getElementById('admin-token') as HTMLInputElement;
+
+adminTokenEl.value = sessionStorage.getItem('adminToken') ?? '';
+adminTokenEl.addEventListener('input', () => {
+  sessionStorage.setItem('adminToken', adminTokenEl.value);
+});
+
+function refreshInterventionControls(): void {
+  const sortedAgents = [...state.agents.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const prior = whisperAgentSel.value;
+  whisperAgentSel.replaceChildren();
+  for (const a of sortedAgents) {
+    const opt = document.createElement('option');
+    opt.value = a.id;
+    opt.textContent = a.name;
+    whisperAgentSel.appendChild(opt);
+  }
+  if (prior && sortedAgents.some((a) => a.id === prior)) whisperAgentSel.value = prior;
+  for (const sel of [eventZoneSel, objectZoneSel]) {
+    const priorZone = sel.value;
+    const head = sel.firstElementChild as HTMLOptionElement | null;
+    sel.replaceChildren();
+    if (head) sel.appendChild(head);
+    for (const z of state.zones) {
+      const opt = document.createElement('option');
+      opt.value = z.name;
+      opt.textContent = z.name;
+      sel.appendChild(opt);
+    }
+    if (priorZone) sel.value = priorZone;
+  }
+  renderObjectList();
+}
+
+function renderObjectList(): void {
+  const objs = [...state.objects.values()].sort((a, b) => b.droppedAtSim - a.droppedAtSim);
+  const frag = document.createDocumentFragment();
+  if (objs.length === 0) {
+    const empty = document.createElement('div');
+    empty.textContent = '(no active objects)';
+    empty.style.opacity = '0.5';
+    frag.appendChild(empty);
+  }
+  for (const o of objs) {
+    const row = document.createElement('div');
+    row.className = 'obj';
+    const label = document.createElement('span');
+    const zone = o.zone ? ` · ${o.zone}` : '';
+    label.textContent = `${o.label}${zone}`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'remove';
+    btn.addEventListener('click', () => {
+      void submitIntervention('object', { op: 'remove', id: o.id }, objectStatusEl, objectDropBtn);
+    });
+    row.appendChild(label);
+    row.appendChild(btn);
+    frag.appendChild(row);
+  }
+  objectListEl.replaceChildren(frag);
+}
+
+async function submitIntervention(
+  kind: 'whisper' | 'event' | 'object',
+  body: unknown,
+  statusEl: HTMLElement,
+  button: HTMLButtonElement,
+): Promise<boolean> {
+  statusEl.textContent = '…';
+  statusEl.className = 'status';
+  button.disabled = true;
+  try {
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    const token = adminTokenEl.value.trim();
+    if (token) headers['x-admin-token'] = token;
+    const res = await fetch(`/api/admin/intervention/${kind}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    const raw = await res.text();
+    let parsed: { error?: string; affected?: string[] } = {};
+    try {
+      parsed = raw ? JSON.parse(raw) : {};
+    } catch {
+      parsed = {};
+    }
+    if (!res.ok) {
+      statusEl.textContent = `✗ ${res.status} ${parsed.error ?? raw.slice(0, 80)}`;
+      statusEl.className = 'status err';
+      return false;
+    }
+    const aff = parsed.affected ?? [];
+    statusEl.textContent = `✓ sent · ${aff.length} agent${aff.length === 1 ? '' : 's'} affected`;
+    statusEl.className = 'status ok';
+    return true;
+  } catch (err) {
+    statusEl.textContent = `✗ ${(err as Error).message}`;
+    statusEl.className = 'status err';
+    return false;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+whisperSendBtn.addEventListener('click', () => {
+  const agentId = whisperAgentSel.value;
+  const text = whisperTextEl.value.trim();
+  if (!agentId || !text) {
+    whisperStatusEl.textContent = '✗ pick agent + text';
+    whisperStatusEl.className = 'status err';
+    return;
+  }
+  void submitIntervention('whisper', { agentId, text }, whisperStatusEl, whisperSendBtn).then(
+    (ok) => {
+      if (ok) whisperTextEl.value = '';
+    },
+  );
+});
+
+eventSendBtn.addEventListener('click', () => {
+  const text = eventTextEl.value.trim();
+  if (!text) {
+    eventStatusEl.textContent = '✗ text required';
+    eventStatusEl.className = 'status err';
+    return;
+  }
+  const zone = eventZoneSel.value || undefined;
+  void submitIntervention('event', { text, zone }, eventStatusEl, eventSendBtn).then((ok) => {
+    if (ok) eventTextEl.value = '';
+  });
+});
+
+objectDropBtn.addEventListener('click', () => {
+  const label = objectLabelEl.value.trim();
+  if (!label) {
+    objectStatusEl.textContent = '✗ label required';
+    objectStatusEl.className = 'status err';
+    return;
+  }
+  const zone = objectZoneSel.value || undefined;
+  void submitIntervention(
+    'object',
+    { op: 'drop', label, zone },
+    objectStatusEl,
+    objectDropBtn,
+  ).then((ok) => {
+    if (ok) objectLabelEl.value = '';
+  });
+});
+
 async function bootstrap(): Promise<void> {
   try {
     const res = await fetch('/api/admin/bootstrap');
@@ -619,6 +813,10 @@ function connect(): void {
       const snap = msg as Snapshot;
       state.clock = snap.clock;
       for (const a of snap.agents) mergeAgent(a);
+      state.zones = [...snap.map.zones];
+      state.objects.clear();
+      for (const o of snap.map.objects ?? []) state.objects.set(o.id, o);
+      refreshInterventionControls();
       renderAll();
     } else {
       applyDelta(msg as Delta);

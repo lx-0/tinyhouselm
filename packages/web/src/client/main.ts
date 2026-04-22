@@ -8,6 +8,7 @@ import {
   type Tile,
   type Vec2,
   type WorldClock,
+  type WorldObject,
   type Zone,
   deriveWorldClock,
 } from '@tina/shared';
@@ -34,6 +35,7 @@ interface ViewState {
   zones: Zone[];
   tiles: Tile[];
   locations: Location[];
+  objects: Map<string, WorldObject>;
   agents: Map<string, AgentView>;
   conversations: Map<string, { participants: string[] }>;
   simTime: number;
@@ -49,6 +51,7 @@ const state: ViewState = {
   zones: [],
   tiles: [],
   locations: [],
+  objects: new Map(),
   agents: new Map(),
   conversations: new Map(),
   simTime: 0,
@@ -123,6 +126,8 @@ function applySnapshot(snapshot: Snapshot): void {
   state.zones = snapshot.map.zones;
   state.tiles = snapshot.map.tiles ?? [];
   state.locations = snapshot.map.locations ?? [];
+  state.objects.clear();
+  for (const o of snapshot.map.objects ?? []) state.objects.set(o.id, o);
   state.speed = snapshot.speed;
   state.simTime = snapshot.simTime;
   state.clock = snapshot.clock ?? deriveWorldClock(snapshot.simTime, snapshot.speed);
@@ -181,6 +186,17 @@ function applyDelta(d: Delta): void {
       appendLog(
         `◦ conversation closed (${d.transcript.length} turns): ${d.participants.join(', ')}`,
       );
+      return;
+    case 'object_add':
+      state.objects.set(d.object.id, d.object);
+      appendLog(`+ ${d.object.label} dropped${d.object.zone ? ` at ${d.object.zone}` : ''}`);
+      return;
+    case 'object_remove':
+      state.objects.delete(d.id);
+      appendLog(`− ${d.label} removed`);
+      return;
+    case 'intervention':
+      appendLog(`⚡ ${d.type}: ${d.summary}`);
       return;
   }
 }
@@ -361,6 +377,22 @@ function draw(): void {
     ctx.arc(cx, cy + 1, TILE * 0.42, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillText(locationGlyph(loc), cx, cy);
+  }
+
+  // Intervention-dropped objects — small star glyph + label.
+  ctx.font = `${Math.floor(TILE * 0.55)}px ui-sans-serif, system-ui, "Apple Color Emoji", "Segoe UI Emoji"`;
+  for (const obj of state.objects.values()) {
+    const cx = obj.pos.x * TILE + TILE / 2;
+    const cy = obj.pos.y * TILE + TILE / 2;
+    ctx.fillStyle = 'rgba(255, 220, 120, 0.25)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, TILE * 0.36, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillText('✨', cx, cy);
+    ctx.font = '9px ui-monospace, Menlo, monospace';
+    ctx.fillStyle = 'rgba(255, 230, 170, 0.9)';
+    ctx.fillText(obj.label, cx, cy + TILE * 0.55);
+    ctx.font = `${Math.floor(TILE * 0.55)}px ui-sans-serif, system-ui, "Apple Color Emoji", "Segoe UI Emoji"`;
   }
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';

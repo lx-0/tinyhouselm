@@ -214,6 +214,84 @@
       }
       .filter input:focus { outline: none; border-color: #b9b0dc; }
       .disconnected { color: #e88c8c; }
+      .intervene {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .intervene fieldset {
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        padding: 8px 10px 10px;
+        margin: 0;
+      }
+      .intervene legend {
+        padding: 0 6px;
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #b9b0dc;
+      }
+      .intervene .row {
+        display: flex;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      .intervene input,
+      .intervene select,
+      .intervene button {
+        background: rgba(255, 255, 255, 0.04);
+        color: #e7e5ee;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 4px;
+        padding: 4px 6px;
+        font-family: inherit;
+        font-size: 11px;
+      }
+      .intervene input { flex: 1; }
+      .intervene input:focus,
+      .intervene select:focus { outline: none; border-color: #b9b0dc; }
+      .intervene button {
+        cursor: pointer;
+        background: rgba(185, 176, 220, 0.15);
+        border-color: rgba(185, 176, 220, 0.35);
+        color: #e7e5ee;
+      }
+      .intervene button:hover { background: rgba(185, 176, 220, 0.28); }
+      .intervene button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .intervene .status {
+        margin-top: 6px;
+        font-size: 10px;
+        font-family: ui-monospace, Menlo, monospace;
+        color: #8888aa;
+        min-height: 1em;
+      }
+      .intervene .status.ok { color: #8ccfa3; }
+      .intervene .status.err { color: #e88c8c; }
+      .intervene .objects {
+        margin-top: 6px;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 10px;
+        color: #b5b5c5;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .intervene .objects .obj {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 2px 4px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .intervene .objects .obj button {
+        padding: 1px 6px;
+        font-size: 10px;
+      }
     </style>
   </head>
   <body>
@@ -242,6 +320,43 @@
         <h2>agents</h2>
         <div class="filter"><input id="agent-filter" placeholder="filter by name…" /></div>
         <div class="scroll" id="agent-list"></div>
+        <div style="padding: 10px 12px; border-top: 1px solid rgba(255,255,255,0.06);">
+          <div class="intervene">
+            <fieldset>
+              <legend>whisper</legend>
+              <div class="row">
+                <select id="whisper-agent"></select>
+              </div>
+              <div class="row">
+                <input id="whisper-text" placeholder="you hear that Mei is crying…" maxlength="400" />
+                <button id="whisper-send" type="button">send</button>
+              </div>
+              <div class="status" id="whisper-status"></div>
+            </fieldset>
+            <fieldset>
+              <legend>world event</legend>
+              <div class="row">
+                <input id="event-text" placeholder="a fire starts in the cafe" maxlength="400" />
+              </div>
+              <div class="row">
+                <select id="event-zone"><option value="">(all zones)</option></select>
+                <button id="event-send" type="button">inject</button>
+              </div>
+              <div class="status" id="event-status"></div>
+            </fieldset>
+            <fieldset>
+              <legend>object</legend>
+              <div class="row">
+                <input id="object-label" placeholder="old letter" maxlength="120" />
+                <select id="object-zone"><option value="">(anywhere)</option></select>
+                <button id="object-drop" type="button">drop</button>
+              </div>
+              <div class="status" id="object-status"></div>
+              <div class="objects" id="object-list"></div>
+            </fieldset>
+            <input id="admin-token" placeholder="x-admin-token (optional)" style="background: rgba(255,255,255,0.04); color: #e7e5ee; border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 4px 6px; font-family: inherit; font-size: 11px;" />
+          </div>
+        </div>
       </section>
     </main>
     <script type="module" src="/admin.js"></script>
