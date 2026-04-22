@@ -336,6 +336,72 @@ describe('Runtime', () => {
     // never resolves; the sim must still tick past it.
   });
 
+  it('does not block the tick loop when many conversations close on the same tick (TINA-22)', async () => {
+    // Regression: a mass-aged-close burst (e.g. ~2000 sessions all hitting
+    // maxAgeSim on the same tick) used to await thousands of disk writes
+    // synchronously inside `sweepConversations`, stalling the sim. With the
+    // fire-and-forget persistConversation fix, the tick loop must complete
+    // even when persistence is artificially slow.
+    const personasN = 6;
+    const agents = await Promise.all(
+      Array.from({ length: personasN }, async (_, i) => {
+        const root = await mkdtemp(join(tmpdir(), `tina-mass-close-${i}-`));
+        const mem = new ParaMemory({
+          root,
+          now: () => new Date('2026-04-18T00:00:00Z'),
+        });
+        // Slow disk: every fact write awaits ~250ms. With N×(N-1) sessions
+        // closing at once and pre-fix awaited disk writes, runTicks(5) would
+        // exceed the wall timeout. With fire-and-forget persistence, ticks
+        // sail through.
+        const origAdd = mem.addFact.bind(mem);
+        mem.addFact = async (input) => {
+          await new Promise((r) => setTimeout(r, 250));
+          return origAdd(input);
+        };
+        return {
+          skill: parseSkillSource(
+            `---\nname: chatter${i}\ndescription: chatty social\n---\n\n# Chatter${i}\n`,
+            `/virtual/chatter${i}/SKILL.md`,
+          ),
+          memory: mem,
+          initial: { position: { x: 4 + i, y: 4 } },
+        };
+      }),
+    );
+    // Aggressive close: maxAgeSim well below the simTime that runTicks(5) reaches.
+    const world = new World({
+      width: 16,
+      height: 16,
+      clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
+    });
+    const speakingPolicy: HeartbeatPolicy = {
+      async decide() {
+        return [{ kind: 'speak', to: null, text: 'hi' }] satisfies AgentAction[];
+      },
+    };
+    const runtime = new Runtime({
+      world,
+      policy: speakingPolicy,
+      agents,
+      seed: 7,
+      tickMs: 100,
+      speechRadius: 32,
+      conversationIdleMs: 600_000,
+      conversationMaxAgeMs: 10,
+      conversationMaxAgeJitter: 0,
+    });
+
+    const timeout = new Promise<'timeout'>((resolve) =>
+      setTimeout(() => resolve('timeout'), 2_000).unref?.(),
+    );
+    const result = await Promise.race([runtime.runTicks(5).then(() => 'done' as const), timeout]);
+    expect(result).toBe('done');
+    expect(runtime.telemetrySnapshot().ticks).toBe(5);
+    // Drain background persistence so test cleanup is well-behaved.
+    await runtime.awaitConversationPersists();
+  });
+
   it('fills perception.recentFacts via recallForDecision so reflections rise to the top', async () => {
     const root = await mkdtemp(join(tmpdir(), 'tina-recall-'));
     const memory = new ParaMemory({ root, now: () => new Date('2026-04-18T00:00:00Z') });

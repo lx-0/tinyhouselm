@@ -49,6 +49,18 @@ export interface RuntimeOptions {
   speechRadius?: number;
   speechTtlMs?: number;
   conversationIdleMs?: number;
+  /**
+   * Per-session age cap in wall-ms (converted to sim-seconds). Force-closes
+   * conversations that exceed it, so persistence + reflection eventually run
+   * even under continuous chatter. Default 60_000 ms wall (= 30 sim-min at
+   * 30× speed).
+   */
+  conversationMaxAgeMs?: number;
+  /**
+   * Fractional jitter (0–0.5) on `conversationMaxAgeMs` to spread close
+   * events across many ticks instead of stampeding the same tick. Default 0.3.
+   */
+  conversationMaxAgeJitter?: number;
   seed?: number;
   onEvent?: (event: RuntimeEvent) => void;
   /**
@@ -228,6 +240,13 @@ export class Runtime {
   private readonly reflectionInFlight = new Set<string>();
   /** Outstanding reflection promises, tracked so tests can await completion. */
   private readonly reflectionPromises = new Map<string, Promise<void>>();
+  /**
+   * Outstanding `persistConversation` promises. Same rationale as reflections
+   * (TINA-21): a mass-close burst (e.g. 1900 sessions all hitting maxAgeSim
+   * on the same tick) would otherwise await thousands of disk writes inside
+   * `tickOnce`, stalling the sim. See TINA-22.
+   */
+  private readonly persistPromises = new Set<Promise<void>>();
   private readonly recallLimit: number;
   private tickIndex = 0;
   private flushInFlight: Promise<void> | null = null;
@@ -254,9 +273,12 @@ export class Runtime {
         clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
       });
     this.clock = this.world.clock;
+    const conversationMaxAgeMs = opts.conversationMaxAgeMs ?? 60_000;
     this.conversations = new ConversationRegistry({
       speechRadius: this.speechRadius,
       idleTtlSim: (conversationIdleMs / 1000) * this.clock.speed,
+      maxAgeSim: (conversationMaxAgeMs / 1000) * this.clock.speed,
+      maxAgeJitter: opts.conversationMaxAgeJitter ?? 0.3,
     });
     this.planRuntime = new PlanRuntime();
 
@@ -387,7 +409,7 @@ export class Runtime {
       this.maybeReflectAgent(agent.def.id, simTime, tick);
     }
 
-    await this.sweepConversations(tick, simTime);
+    this.sweepConversations(tick, simTime);
     this.tickIndex += 1;
     this.telemetry.setActiveConversations(this.conversations.activeCount());
     this.telemetry.recordTickDuration(performance.now() - tickStart);
@@ -439,8 +461,9 @@ export class Runtime {
       onClose: (session, reason) => pending.push({ session, reason }),
     });
     for (const { session, reason } of pending) {
-      await this.handleConversationClose(session, reason, tick, simTime);
+      this.handleConversationClose(session, reason, tick, simTime);
     }
+    await this.awaitConversationPersists();
     await this.flushMemories();
   }
 
@@ -961,7 +984,7 @@ export class Runtime {
     }
   }
 
-  private async sweepConversations(tick: number, simTime: SimTime): Promise<void> {
+  private sweepConversations(tick: number, simTime: SimTime): void {
     const positions = new Map<string, Vec2>();
     for (const agent of this.agents) positions.set(agent.def.id, agent.state.position);
     const pending: Array<{ session: ConversationSession; reason: CloseReason }> = [];
@@ -969,16 +992,16 @@ export class Runtime {
       onClose: (session, reason) => pending.push({ session, reason }),
     });
     for (const { session, reason } of pending) {
-      await this.handleConversationClose(session, reason, tick, simTime);
+      this.handleConversationClose(session, reason, tick, simTime);
     }
   }
 
-  private async handleConversationClose(
+  private handleConversationClose(
     session: ConversationSession,
     reason: CloseReason,
     tick: number,
     simTime: SimTime,
-  ): Promise<void> {
+  ): void {
     const participants = [...session.participants];
     this.world.emit({
       kind: 'conversation_close',
@@ -997,7 +1020,21 @@ export class Runtime {
       transcript: session.transcript,
       reason,
     });
-    await this.persistConversation(session, participants);
+    // Fire-and-forget: a mass-close burst would otherwise stall the tick on
+    // thousands of awaited disk writes (TINA-22). Errors are swallowed so the
+    // sim keeps ticking; persistence is best-effort observability.
+    const promise = this.persistConversation(session, participants).catch((err) => {
+      process.stderr.write(
+        `${JSON.stringify({
+          level: 'warn',
+          event: 'conversation.persist.failure',
+          sessionId: session.id,
+          message: err instanceof Error ? err.message : String(err),
+        })}\n`,
+      );
+    });
+    this.persistPromises.add(promise);
+    promise.finally(() => this.persistPromises.delete(promise));
   }
 
   private async persistConversation(
@@ -1163,6 +1200,17 @@ export class Runtime {
   /** Test/support hook: wait for any in-flight reflections to finish. */
   async awaitReflections(): Promise<void> {
     const pending = [...this.reflectionPromises.values()];
+    if (pending.length === 0) return;
+    await Promise.allSettled(pending);
+  }
+
+  /**
+   * Test/support hook: wait for any in-flight `persistConversation` writes to
+   * finish. Used by `flushConversations` and tests that need to assert the
+   * "talked with …" facts have actually landed on disk.
+   */
+  async awaitConversationPersists(): Promise<void> {
+    const pending = [...this.persistPromises];
     if (pending.length === 0) return;
     await Promise.allSettled(pending);
   }

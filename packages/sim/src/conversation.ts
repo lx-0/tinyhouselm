@@ -7,6 +7,12 @@ export interface ConversationSession {
   transcript: ConversationTurn[];
   openedAt: SimTime;
   lastActivityAt: SimTime;
+  /**
+   * Per-session age cap (sim seconds), jittered around `maxAgeSim` at open
+   * time so a thundering herd of same-tick opens doesn't all hit the cap on
+   * the same future tick. See TINA-22.
+   */
+  ageCapSim: SimTime;
 }
 
 export type CloseReason = 'drifted' | 'idle' | 'aged';
@@ -33,6 +39,17 @@ export interface ConversationOptions {
    * reflection engine's importance budget. Default: 1800 (30 sim-minutes).
    */
   maxAgeSim?: number;
+  /**
+   * Per-session jitter applied to `maxAgeSim` (fractional, 0–0.5). Each
+   * session's actual age cap is `maxAgeSim * (1 ± jitter)`. Spreads the
+   * close stampede across many ticks instead of all expiring on the same
+   * tick. Default: 0.3 (±30%).
+   */
+  maxAgeJitter?: number;
+  /**
+   * Deterministic RNG injected for tests. Defaults to Math.random.
+   */
+  rng?: () => number;
 }
 
 type PairKey = string;
@@ -43,16 +60,28 @@ function pairKey(a: string, b: string): PairKey {
 
 const DEFAULT_MAX_TRANSCRIPT_TURNS = 50;
 const DEFAULT_MAX_AGE_SIM = 1800;
+const DEFAULT_MAX_AGE_JITTER = 0.3;
 
 export class ConversationRegistry {
   private sessions = new Map<PairKey, ConversationSession>();
   private nextId = 1;
   private readonly maxTranscriptTurns: number;
   private readonly maxAgeSim: number;
+  private readonly maxAgeJitter: number;
+  private readonly rng: () => number;
 
   constructor(private opts: ConversationOptions) {
     this.maxTranscriptTurns = opts.maxTranscriptTurns ?? DEFAULT_MAX_TRANSCRIPT_TURNS;
     this.maxAgeSim = opts.maxAgeSim ?? DEFAULT_MAX_AGE_SIM;
+    this.maxAgeJitter = Math.max(0, Math.min(0.5, opts.maxAgeJitter ?? DEFAULT_MAX_AGE_JITTER));
+    this.rng = opts.rng ?? Math.random;
+  }
+
+  private nextAgeCap(): SimTime {
+    if (this.maxAgeJitter === 0) return this.maxAgeSim;
+    // Uniform in [-jitter, +jitter] applied multiplicatively.
+    const offset = (this.rng() * 2 - 1) * this.maxAgeJitter;
+    return Math.max(1, this.maxAgeSim * (1 + offset));
   }
 
   /**
@@ -77,6 +106,7 @@ export class ConversationRegistry {
           transcript: [],
           openedAt: at,
           lastActivityAt: at,
+          ageCapSim: this.nextAgeCap(),
         };
         this.sessions.set(key, session);
         observer.onOpen?.(session);
@@ -109,7 +139,7 @@ export class ConversationRegistry {
           ? 'drifted'
           : now - session.lastActivityAt > this.opts.idleTtlSim
             ? 'idle'
-            : now - session.openedAt > this.maxAgeSim
+            : now - session.openedAt > session.ageCapSim
               ? 'aged'
               : null;
       if (close) {

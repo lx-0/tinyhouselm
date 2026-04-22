@@ -216,6 +216,7 @@ describe('ConversationRegistry', () => {
       speechRadius: 10,
       idleTtlSim: 100_000,
       maxAgeSim: 30,
+      maxAgeJitter: 0,
     });
     // Keep speaking well past the age cap — idle timer never trips.
     for (let t = 0; t <= 50; t++) {
@@ -232,6 +233,39 @@ describe('ConversationRegistry', () => {
     });
     expect(closed).toEqual([{ participants: 'a,b', reason: 'aged' }]);
     expect(registry.activeCount()).toBe(0);
+  });
+
+  it("jitters per-session ageCapSim around maxAgeSim so closes don't stampede on the same tick (TINA-22)", () => {
+    // Deterministic RNG: returns 0, 0.25, 0.5, 0.75, 1.0 then repeats.
+    let i = 0;
+    const samples = [0, 0.25, 0.5, 0.75, 1.0];
+    const rng = () => samples[i++ % samples.length]!;
+    const registry = new ConversationRegistry({
+      speechRadius: 10,
+      idleTtlSim: 100_000,
+      maxAgeSim: 1000,
+      maxAgeJitter: 0.3,
+      rng,
+    });
+    // Open 5 sessions at the same simTime (the stampede setup). With ±30%
+    // jitter, the per-session caps must span at least a 200-unit range so a
+    // single tick can't expire them all.
+    for (let s = 0; s < 5; s++) {
+      registry.recordSpeech(`s${s}`, 'hi', 0, [`t${s}`], {});
+    }
+    const caps: number[] = [];
+    registry.drain({
+      onClose: (sess) => {
+        caps.push(sess.ageCapSim);
+      },
+    });
+    expect(caps).toHaveLength(5);
+    const min = Math.min(...caps);
+    const max = Math.max(...caps);
+    // 0 → 700, 0.25 → 850, 0.5 → 1000, 0.75 → 1150, 1.0 → 1300
+    expect(min).toBe(700);
+    expect(max).toBe(1300);
+    expect(max - min).toBeGreaterThan(500);
   });
 });
 
