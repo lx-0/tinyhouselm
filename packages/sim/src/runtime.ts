@@ -219,6 +219,15 @@ export class Runtime {
   private readonly reflectionEngines = new Map<string, ReflectionEngine>();
   private readonly reflectionsEnabled: boolean;
   private readonly reflectionOpts: ReflectionEngineOptions;
+  /**
+   * Agents with a reflection synthesis in flight. Reflections call the LLM
+   * gateway, which can take seconds; awaiting them inside `tickOnce` stalls
+   * the whole sim (see TINA-21). We fire-and-forget and skip re-entry for
+   * the same agent while a call is still pending.
+   */
+  private readonly reflectionInFlight = new Set<string>();
+  /** Outstanding reflection promises, tracked so tests can await completion. */
+  private readonly reflectionPromises = new Map<string, Promise<void>>();
   private readonly recallLimit: number;
   private tickIndex = 0;
   private flushInFlight: Promise<void> | null = null;
@@ -375,7 +384,7 @@ export class Runtime {
       agent.state.zone = this.world.zoneAt(agent.state.position);
       agent.state.lastHeartbeatAt = simTime;
 
-      await this.maybeReflectAgent(agent.def.id, simTime, tick);
+      this.maybeReflectAgent(agent.def.id, simTime, tick);
     }
 
     await this.sweepConversations(tick, simTime);
@@ -1103,27 +1112,59 @@ export class Runtime {
     };
   }
 
-  private async maybeReflectAgent(agentId: string, simTime: SimTime, tick: number): Promise<void> {
+  /**
+   * Fire-and-forget reflection trigger. We intentionally do NOT await the
+   * underlying call because synthesis may hit the LLM gateway over the
+   * network, and stalling the tick loop on I/O is what caused TINA-21. If
+   * a reflection is already in flight for this agent, we skip — the next
+   * tick will try again once the previous call resolves.
+   */
+  private maybeReflectAgent(agentId: string, simTime: SimTime, tick: number): void {
     const engine = this.reflectionEngines.get(agentId);
     if (!engine) return;
     const memory = this.memories.get(agentId);
     if (!memory) return;
-    const result = await engine.maybeReflect({ memory, simTime });
-    if (!result) return;
-    // Emit one event per bullet so the admin dashboard can track each
-    // reflection individually and the observability store sees the full set.
-    for (const r of result.reflections) {
-      this.emit({
-        kind: 'reflection_written',
-        tick,
-        simTime,
-        agentId,
-        trigger: result.trigger,
-        reflectionId: r.id,
-        summary: r.fact,
-        sourceCount: r.derived_from?.length ?? result.sourceFactIds.length,
-      });
-    }
+    if (this.reflectionInFlight.has(agentId)) return;
+    this.reflectionInFlight.add(agentId);
+    const promise = (async () => {
+      try {
+        const result = await engine.maybeReflect({ memory, simTime });
+        if (!result) return;
+        for (const r of result.reflections) {
+          this.emit({
+            kind: 'reflection_written',
+            tick,
+            simTime,
+            agentId,
+            trigger: result.trigger,
+            reflectionId: r.id,
+            summary: r.fact,
+            sourceCount: r.derived_from?.length ?? result.sourceFactIds.length,
+          });
+        }
+      } catch (err) {
+        // Never let a reflection error bubble — the sim must keep ticking.
+        process.stderr.write(
+          `${JSON.stringify({
+            level: 'warn',
+            event: 'reflection.error',
+            agentId,
+            message: err instanceof Error ? err.message : String(err),
+          })}\n`,
+        );
+      } finally {
+        this.reflectionInFlight.delete(agentId);
+        this.reflectionPromises.delete(agentId);
+      }
+    })();
+    this.reflectionPromises.set(agentId, promise);
+  }
+
+  /** Test/support hook: wait for any in-flight reflections to finish. */
+  async awaitReflections(): Promise<void> {
+    const pending = [...this.reflectionPromises.values()];
+    if (pending.length === 0) return;
+    await Promise.allSettled(pending);
   }
 
   private pruneRecent(): void {

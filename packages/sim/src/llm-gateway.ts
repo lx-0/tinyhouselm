@@ -33,6 +33,13 @@ export interface GatewaySynthesizerOptions {
   log?: (level: 'info' | 'warn' | 'error', event: string, fields: Record<string, unknown>) => void;
   /** Injected fetch for tests. Defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  /**
+   * Per-request hard timeout in ms. Aborts the fetch and falls back to the
+   * deterministic synthesizer if the gateway doesn't respond in time. Without
+   * this, a hung TCP connection can stall the sim tick loop indefinitely
+   * (see TINA-21). Default 10000.
+   */
+  requestTimeoutMs?: number;
 }
 
 interface TierPricing {
@@ -97,6 +104,7 @@ export function createGatewaySynthesizer(opts: GatewaySynthesizerOptions): Refle
   const model = opts.model ?? DEFAULT_MODEL;
   const maxTokens = opts.maxTokens ?? 400;
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const requestTimeoutMs = opts.requestTimeoutMs ?? 10_000;
   const log =
     opts.log ??
     ((level: 'info' | 'warn' | 'error', event: string, fields: Record<string, unknown>) => {
@@ -119,6 +127,8 @@ export function createGatewaySynthesizer(opts: GatewaySynthesizerOptions): Refle
       }
 
       const prompt = buildPrompt(facts, ctx);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
       try {
         const res = await fetchImpl(`${baseUrl}/chat/completions`, {
           method: 'POST',
@@ -134,6 +144,7 @@ export function createGatewaySynthesizer(opts: GatewaySynthesizerOptions): Refle
               { role: 'user', content: prompt.user },
             ],
           }),
+          signal: controller.signal,
         });
 
         if (!res.ok) {
@@ -177,11 +188,15 @@ export function createGatewaySynthesizer(opts: GatewaySynthesizerOptions): Refle
         });
         return bullets;
       } catch (err) {
-        log('warn', 'reflection.gateway.failure', {
+        const aborted = controller.signal.aborted;
+        log('warn', aborted ? 'reflection.gateway.timeout' : 'reflection.gateway.failure', {
           entity: ctx.entity,
+          timeoutMs: aborted ? requestTimeoutMs : undefined,
           message: err instanceof Error ? err.message : String(err),
         });
         return fallback.synthesize(facts, ctx);
+      } finally {
+        clearTimeout(timer);
       }
     },
   };

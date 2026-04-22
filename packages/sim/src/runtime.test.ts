@@ -258,6 +258,7 @@ describe('Runtime', () => {
     });
 
     await runtime.runTicks(20);
+    await runtime.awaitReflections();
 
     const reflections = events.filter((e) => e.kind === 'reflection_written');
     expect(reflections.length).toBeGreaterThan(0);
@@ -266,6 +267,73 @@ describe('Runtime', () => {
     expect(first.trigger).toBe('importance_budget');
     expect(first.sourceCount).toBeGreaterThanOrEqual(4);
     expect(runtime.telemetrySnapshot().reflectionsWritten).toBe(reflections.length);
+  });
+
+  it('does not block the tick loop on slow reflection synthesis', async () => {
+    // Regression: TINA-21. Synchronously awaiting the reflection synthesizer
+    // inside tickOnce caused a hung LLM call to stall the entire sim. With
+    // the fire-and-forget fix, a synthesizer that never resolves must not
+    // prevent the next tick from advancing.
+    const root = await mkdtemp(join(tmpdir(), 'tina-refl-nonblock-'));
+    const world = new World({
+      width: 16,
+      height: 16,
+      clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
+    });
+    let synthCalls = 0;
+    const neverResolves = new Promise<never>(() => {}); // never settles
+    const rememberPolicy: HeartbeatPolicy = {
+      async decide(ctx) {
+        return [
+          { kind: 'remember', fact: `noticed thing ${ctx.perception.tick}` },
+        ] satisfies AgentAction[];
+      },
+    };
+    const runtime = new Runtime({
+      world,
+      policy: rememberPolicy,
+      agents: [
+        {
+          skill: parseSkillSource(
+            '---\nname: stallwatcher\ndescription: a thinker\n---\n\n# Stallwatcher\n',
+            '/virtual/stallwatcher/SKILL.md',
+          ),
+          memory: new ParaMemory({
+            root,
+            now: () => new Date('2026-04-18T00:00:00Z'),
+          }),
+          initial: { position: { x: 4, y: 4 } },
+        },
+      ],
+      seed: 1,
+      tickMs: 100,
+      reflections: {
+        importanceBudget: 5,
+        minFacts: 2,
+        synthesizer: {
+          label: 'stalling',
+          synthesize: async () => {
+            synthCalls += 1;
+            // Simulate a hung LLM call — this promise never resolves. Before
+            // the fix this would deadlock the tick loop.
+            await neverResolves;
+            return [];
+          },
+        },
+      },
+    });
+
+    // Race runTicks(20) against a 2s wall timeout. With the fix, ticks
+    // complete almost instantly because reflection is fire-and-forget.
+    const timeout = new Promise<'timeout'>((resolve) =>
+      setTimeout(() => resolve('timeout'), 2_000).unref?.(),
+    );
+    const result = await Promise.race([runtime.runTicks(20).then(() => 'done' as const), timeout]);
+    expect(result).toBe('done');
+    expect(runtime.telemetrySnapshot().ticks).toBe(20);
+    expect(synthCalls).toBeGreaterThan(0);
+    // We do NOT await runtime.awaitReflections here because the synthesizer
+    // never resolves; the sim must still tick past it.
   });
 
   it('fills perception.recentFacts via recallForDecision so reflections rise to the top', async () => {

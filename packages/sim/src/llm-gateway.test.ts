@@ -153,6 +153,35 @@ describe('createGatewaySynthesizer', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('aborts and falls back when the gateway hangs past requestTimeoutMs (TINA-21)', async () => {
+    const mem = await seedMemory();
+    const facts = await mem.readFacts();
+    // A fetch that hangs until the AbortSignal fires. If we never abort, this
+    // never resolves — which is exactly the bug we're defending against.
+    const fetchImpl = vi.fn(async (_url: unknown, init: RequestInit | undefined) => {
+      const signal = init?.signal;
+      if (!signal) throw new Error('test expected AbortSignal to be passed');
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        });
+      });
+    }) as unknown as typeof fetch;
+    const logs: Array<{ level: string; event: string }> = [];
+    const synth = createGatewaySynthesizer({
+      apiKey: 'sk-test',
+      fetchImpl,
+      requestTimeoutMs: 50,
+      log: (level, event) => logs.push({ level, event }),
+    });
+    const start = Date.now();
+    const bullets = await synth.synthesize(facts, { entity: 'mei', trigger: 'manual', day: 0 });
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(1_000);
+    expect(bullets.length).toBeGreaterThan(0); // deterministic fallback
+    expect(logs.some((l) => l.event === 'reflection.gateway.timeout')).toBe(true);
+  });
+
   it('falls back to deterministic on HTTP error', async () => {
     const mem = await seedMemory();
     const facts = await mem.readFacts();
