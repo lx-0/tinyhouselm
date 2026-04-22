@@ -12,8 +12,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/sim/package.json packages/sim/
 COPY packages/web/package.json packages/web/
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
-    pnpm install --frozen-lockfile --prod=false
+RUN pnpm install --frozen-lockfile --prod=false
 
 # -- runtime: copy source + node_modules, run with tsx --
 FROM base AS runtime
