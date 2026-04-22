@@ -22,12 +22,17 @@ export type {
   RecallOptions,
   RecalledFact,
 } from './memory.js';
-export { ReflectionEngine } from './reflection.js';
+export { ReflectionEngine, deterministicSynthesizer } from './reflection.js';
 export type {
   ReflectionEngineOptions,
   ReflectionTrigger,
   ReflectionResult,
+  ReflectionBullet,
+  ReflectionSynthesizer,
+  SynthesisContext,
 } from './reflection.js';
+export { createLlmSynthesizer } from './llm-reflection.js';
+export type { LlmBudget, LlmSynthesizerOptions } from './llm-reflection.js';
 export {
   timeOfDay,
   chebyshevDistance,
@@ -47,6 +52,7 @@ export {
   simDay,
   simHour,
   inferPersonaSchedule,
+  extractZoneAvoidances,
 } from './plan.js';
 export type {
   DayPlan,
@@ -58,6 +64,7 @@ export type {
   GeneratePlanInput,
   PersonaSchedule,
   WeekendMode,
+  CarriedReflection,
 } from './plan.js';
 export { ConversationRegistry } from './conversation.js';
 export type {
