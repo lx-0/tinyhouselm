@@ -10,6 +10,7 @@ import {
   SimulationClock,
   World,
   buildStarterTown,
+  createLlmSynthesizer,
   homeForAgent,
   loadAllSkills,
   nearestWalkable,
@@ -101,11 +102,23 @@ async function main(): Promise<void> {
     };
   });
 
+  const anthropicKey = process.env.ANTHROPIC_API_KEY?.trim();
+  const llmSynth = anthropicKey
+    ? createLlmSynthesizer({
+        apiKey: anthropicKey,
+        budget,
+        log: (level, event, fields) => log[level](event, fields),
+        model: process.env.REFLECTION_MODEL || undefined,
+      })
+    : undefined;
+  log.info('web.reflection.synth', { llm: !!llmSynth, budgetCapUsd: budget.state().capUsd });
+
   const runtime = new Runtime({
     agents: runtimeAgents,
     world,
     tickMs: TICK_MS,
     seed: SEED,
+    reflections: llmSynth ? { synthesizer: llmSynth } : {},
   });
 
   log.info('web.personas.loaded', { count: skills.length });

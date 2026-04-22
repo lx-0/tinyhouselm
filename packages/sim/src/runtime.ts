@@ -201,7 +201,10 @@ export class Runtime {
     this.memories.set(agent.def.id, entry.memory);
     this.skills.set(agent.def.id, entry.skill);
     if (this.reflectionsEnabled) {
-      this.reflectionEngines.set(agent.def.id, new ReflectionEngine(this.reflectionOpts));
+      this.reflectionEngines.set(
+        agent.def.id,
+        new ReflectionEngine({ ...this.reflectionOpts, entity: agent.def.id }),
+      );
     }
     this.world.addAgent(agent);
     this.emit({ kind: 'spawn', agentId: agent.def.id, name: agent.def.name });
@@ -717,16 +720,20 @@ export class Runtime {
     if (!memory) return;
     const result = await engine.maybeReflect({ memory, simTime });
     if (!result) return;
-    this.emit({
-      kind: 'reflection_written',
-      tick,
-      simTime,
-      agentId,
-      trigger: result.trigger,
-      reflectionId: result.reflection.id,
-      summary: result.reflection.fact,
-      sourceCount: result.sourceFactIds.length,
-    });
+    // Emit one event per bullet so the admin dashboard can track each
+    // reflection individually and the observability store sees the full set.
+    for (const r of result.reflections) {
+      this.emit({
+        kind: 'reflection_written',
+        tick,
+        simTime,
+        agentId,
+        trigger: result.trigger,
+        reflectionId: r.id,
+        summary: r.fact,
+        sourceCount: r.derived_from?.length ?? result.sourceFactIds.length,
+      });
+    }
   }
 
   private pruneRecent(): void {
