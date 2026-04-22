@@ -19,6 +19,7 @@ import {
 } from '@tina/sim';
 import { build as esbuild } from 'esbuild';
 import { createBudget, resolveBudgetCap } from './budget.js';
+import { InterventionHandlers } from './intervention.js';
 import { log } from './logger.js';
 import { ObservabilityStore } from './observability.js';
 import { buildSnapshot } from './snapshot.js';
@@ -227,6 +228,16 @@ async function main(): Promise<void> {
   const indexHtml = await readFile(resolve(PUBLIC_DIR, 'index.html'), 'utf8');
   const adminHtml = await readFile(resolve(PUBLIC_DIR, 'admin.html'), 'utf8');
 
+  const interventionHandlers = new InterventionHandlers({
+    runtime,
+    broadcast: (d) => broadcast(d),
+    onAdmit: (kind) => {
+      budget.record(0, `admin:intervention:${kind}`);
+      log.info('admin.intervention', { kind });
+    },
+    adminToken: process.env.ADMIN_TOKEN || null,
+  });
+
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
       res.writeHead(400);
@@ -253,6 +264,10 @@ async function main(): Promise<void> {
       res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
       res.end(adminJs);
       return;
+    }
+    if (req.method === 'POST' && url.pathname.startsWith('/api/admin/intervention/')) {
+      const handled = await interventionHandlers.tryHandle(req, res, url.pathname);
+      if (handled) return;
     }
     if (req.method === 'GET' && url.pathname === '/api/admin/bootstrap') {
       res.writeHead(200, { 'content-type': 'application/json' });
