@@ -1,6 +1,6 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { ParaMemory } from './memory.js';
@@ -88,5 +88,48 @@ describe('ParaMemory', () => {
     await mem.addFact({ fact: 'painted in the studio', category: 'observation' });
     const recalled = await mem.recallForDecision({ query: 'espresso', limit: 1 });
     expect(recalled[0]!.fact.fact).toContain('espresso');
+  });
+
+  it('appendDailyNote is byte-equivalent to string-concat for 10k deferred appends', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tina-mem-'));
+    const mem = new ParaMemory({ root, now: fixedNow, flushMode: 'deferred' });
+    const N = 10_000;
+    let expected = '# 2026-04-18\n\n';
+    for (let i = 0; i < N; i++) {
+      const line = `entry ${i}`;
+      expected += `- ${line}\n`;
+      await mem.appendDailyNote(line);
+    }
+    await mem.flush();
+    const body = await readFile(join(root, 'memory/2026-04-18.md'), 'utf8');
+    expect(body).toBe(expected);
+  });
+
+  it('appendDailyNote preserves existing on-disk content when appending to a prior day', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tina-mem-'));
+    const existing = '# 2026-04-18\n\n- morning coffee\n- read the paper\n';
+    const dailyPath = join(root, 'memory/2026-04-18.md');
+    await mkdir(dirname(dailyPath), { recursive: true });
+    await writeFile(dailyPath, existing, 'utf8');
+    const mem = new ParaMemory({ root, now: fixedNow });
+    await mem.appendDailyNote('met Mei');
+    const body = await readFile(dailyPath, 'utf8');
+    expect(body).toBe(`${existing}- met Mei\n`);
+  });
+
+  it('appendDailyNote allocation pattern stays linear (10k appends finish fast)', async () => {
+    // Regression guard for the quadratic-buffer leak fixed under TINA-32.
+    // The old implementation reallocated the full day buffer on every append,
+    // so 10k deferred appends took seconds. The array-backed path should
+    // finish well under a second even on slow CI.
+    const root = await mkdtemp(join(tmpdir(), 'tina-mem-'));
+    const mem = new ParaMemory({ root, now: fixedNow, flushMode: 'deferred' });
+    const N = 10_000;
+    const started = Date.now();
+    for (let i = 0; i < N; i++) {
+      await mem.appendDailyNote(`line ${i}`);
+    }
+    const elapsedMs = Date.now() - started;
+    expect(elapsedMs).toBeLessThan(2000);
   });
 });

@@ -5,8 +5,7 @@ ENV PNPM_HOME=/pnpm \
     CI=true \
     NODE_ENV=production \
     PORT=8080 \
-    LOG_LEVEL=info \
-    NODE_OPTIONS=--max-old-space-size=6144
+    LOG_LEVEL=info
 RUN corepack enable && corepack prepare pnpm@10.0.0 --activate
 
 WORKDIR /app

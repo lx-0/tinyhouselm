@@ -1058,6 +1058,18 @@ export class Runtime {
     const transcriptSummary = session.transcript
       .map((t) => `${nameById.get(t.speakerId) ?? t.speakerId}: ${t.text}`)
       .join(' | ');
+    // Daily-note lines are breadcrumbs, not storage. The full summary goes into
+    // the relationship fact below; here we cap to the first 5 turns so hot-path
+    // appends don't balloon the in-memory buffer per session close.
+    const TRANSCRIPT_BREADCRUMB_TURNS = 5;
+    const totalTurns = session.transcript.length;
+    const breadcrumb =
+      totalTurns <= TRANSCRIPT_BREADCRUMB_TURNS
+        ? transcriptSummary
+        : `${session.transcript
+            .slice(0, TRANSCRIPT_BREADCRUMB_TURNS)
+            .map((t) => `${nameById.get(t.speakerId) ?? t.speakerId}: ${t.text}`)
+            .join(' | ')} … (${totalTurns} turns total)`;
     const openedAt = session.openedAt.toFixed(1);
     for (const id of participants) {
       const memory = this.memories.get(id);
@@ -1072,7 +1084,7 @@ export class Runtime {
       });
       this.reflectionEngines.get(id)?.noteNewFact(fact);
       await memory.appendDailyNote(
-        `t=${openedAt}s conversation with ${label} (${session.transcript.length} turns) — ${transcriptSummary}`,
+        `t=${openedAt}s conversation with ${label} (${totalTurns} turns) — ${breadcrumb}`,
       );
     }
   }

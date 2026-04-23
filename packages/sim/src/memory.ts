@@ -88,8 +88,10 @@ export class ParaMemory {
   private facts: MemoryFact[] | null = null;
   private factsDirty = false;
 
-  private dailyBuffers = new Map<string, string>();
-  private dailyLoaded = new Set<string>();
+  // Array-backed to keep appendDailyNote O(1) amortized. Joining the chunks
+  // only happens at flush time, so hot paths that fire hundreds of appends
+  // per tick don't realloc a whole buffer per call.
+  private dailyBuffers = new Map<string, string[]>();
   private dailyDirty = new Set<string>();
 
   constructor(opts: ParaMemoryOptions) {
@@ -146,19 +148,20 @@ export class ParaMemory {
     this.factsDirty = false;
   }
 
-  private async loadDaily(day: string): Promise<string> {
-    if (this.dailyLoaded.has(day)) return this.dailyBuffers.get(day) ?? '';
+  private async loadDailyBuf(day: string): Promise<string[]> {
+    const cached = this.dailyBuffers.get(day);
+    if (cached) return cached;
     const existing = (await readFileOrEmpty(this.dailyPath(day))) ?? '';
-    this.dailyBuffers.set(day, existing);
-    this.dailyLoaded.add(day);
-    return existing;
+    const buf: string[] = existing ? [existing] : [`# ${day}\n\n`];
+    this.dailyBuffers.set(day, buf);
+    return buf;
   }
 
   private async writeDailyNow(day: string): Promise<void> {
-    const body = this.dailyBuffers.get(day);
-    if (body === undefined) return;
+    const buf = this.dailyBuffers.get(day);
+    if (buf === undefined) return;
     await ensureDir(dirname(this.dailyPath(day)));
-    await writeFile(this.dailyPath(day), body, 'utf8');
+    await writeFile(this.dailyPath(day), buf.join(''), 'utf8');
     this.dailyDirty.delete(day);
   }
 
@@ -247,10 +250,8 @@ export class ParaMemory {
 
   async appendDailyNote(text: string, date?: string): Promise<void> {
     const day = date ?? this.today();
-    const existing = await this.loadDaily(day);
-    const header = existing ? '' : `# ${day}\n\n`;
-    const updated = `${existing}${header}- ${text}\n`;
-    this.dailyBuffers.set(day, updated);
+    const buf = await this.loadDailyBuf(day);
+    buf.push(`- ${text}\n`);
     this.dailyDirty.add(day);
     if (this.flushMode === 'eager') await this.writeDailyNow(day);
   }
