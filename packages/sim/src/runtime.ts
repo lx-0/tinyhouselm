@@ -1090,17 +1090,19 @@ export class Runtime {
   }
 
   private async recordListenerMemory(
-    speaker: Agent,
-    text: string,
-    listenerIds: string[],
-    simTime: SimTime,
+    _speaker: Agent,
+    _text: string,
+    _listenerIds: string[],
+    _simTime: SimTime,
   ): Promise<void> {
-    if (listenerIds.length === 0) return;
-    for (const id of listenerIds) {
-      const memory = this.memories.get(id);
-      if (!memory) continue;
-      await memory.appendDailyNote(`t=${simTime.toFixed(1)}s heard ${speaker.def.name}: "${text}"`);
-    }
+    // Intentionally a no-op. Recording one daily-note line per listener per
+    // speech produced hundreds of appends per tick in dense zones, and the
+    // retained buffer grew ~60 MB/min under SIM_SPEED=30 even with the
+    // array-backed O(N) allocation fix. Listener context is already captured
+    // via `recent.speech` for perception, and any relationship that matters
+    // gets persisted through `persistConversation` when two agents actually
+    // converse. Keeping the method so callers don't have to change; we may
+    // reintroduce a sampled/capped version later if behaviour regresses.
   }
 
   private async buildPerception(
