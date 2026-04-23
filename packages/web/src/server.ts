@@ -124,20 +124,41 @@ async function bundleClient(entryFile: string): Promise<string> {
   return out.text;
 }
 
+// Boot-phase timer. Logs `web.boot.step` per phase so a slow boot leaves
+// breadcrumbs even when we have no external access to the running container.
+// See TINA-31 for the recurring "boot got stuck somewhere — where?" question.
+async function timedBootStep<T>(step: string, fn: () => Promise<T>): Promise<T> {
+  const start = performance.now();
+  try {
+    const result = await fn();
+    log.info('web.boot.step', { step, ms: Math.round(performance.now() - start) });
+    return result;
+  } catch (err) {
+    log.error('web.boot.step.error', {
+      step,
+      ms: Math.round(performance.now() - start),
+      err,
+    });
+    throw err;
+  }
+}
+
 async function main(): Promise<void> {
   const bootStart = performance.now();
   const budget = createBudget(resolveBudgetCap());
   log.info('web.boot.start', { port: PORT, seed: SEED, tickMs: TICK_MS, simSpeed: SIM_SPEED });
 
-  const clientJs = await bundleClient('main.ts');
-  const adminJs = await bundleClient('admin.ts');
+  const clientJs = await timedBootStep('bundle_client.main', () => bundleClient('main.ts'));
+  const adminJs = await timedBootStep('bundle_client.admin', () => bundleClient('admin.ts'));
 
   const agentsDir = resolve(REPO_ROOT, 'world', 'agents');
   const namedDir = resolve(REPO_ROOT, 'packages', 'sim', 'personas', 'named');
-  const { skills, named, memoryRootFor } = await loadAllPersonas({
-    namedManifestDir: namedDir,
-    proceduralDir: agentsDir,
-  });
+  const { skills, named, memoryRootFor } = await timedBootStep('load_personas', () =>
+    loadAllPersonas({
+      namedManifestDir: namedDir,
+      proceduralDir: agentsDir,
+    }),
+  );
   if (skills.length === 0) {
     throw new Error(`no personas found under ${agentsDir} (named dir: ${namedDir})`);
   }
@@ -231,8 +252,8 @@ async function main(): Promise<void> {
 
   // Snapshot restore — before first tick, before SSE subscribers.
   if (SIM_SNAPSHOT_ENABLED) {
-    const restored = await readSnapshot(SIM_SNAPSHOT_DIR, (level, event, fields) =>
-      log[level](event, fields),
+    const restored = await timedBootStep('read_snapshot', () =>
+      readSnapshot(SIM_SNAPSHOT_DIR, (level, event, fields) => log[level](event, fields)),
     );
     if (restored) {
       try {
