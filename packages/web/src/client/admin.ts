@@ -82,6 +82,9 @@ interface AgentView {
   plan: PlanContext | null;
   recent: string[];
   reflections: ReflectionView[];
+  named: boolean;
+  color: string | null;
+  bio: string | null;
 }
 
 interface ReflectionView {
@@ -147,6 +150,11 @@ function agentColor(id: string): string {
   return `hsl(${hashHue(id)} 65% 58%)`;
 }
 
+function colorForAgent(view: AgentView | undefined, id: string): string {
+  if (view?.named && view.color) return view.color;
+  return agentColor(id);
+}
+
 function pairKey(a: string, b: string): string {
   return a < b ? `${a}|${b}` : `${b}|${a}`;
 }
@@ -168,6 +176,9 @@ function mergeAgent(snap: AgentSnap): void {
     plan: snap.plan ?? existing?.plan ?? null,
     recent,
     reflections,
+    named: snap.named ?? existing?.named ?? false,
+    color: snap.color ?? existing?.color ?? null,
+    bio: snap.bio ?? existing?.bio ?? null,
   });
 }
 
@@ -494,13 +505,18 @@ function renderConversations(): void {
 }
 
 function renderAgents(): void {
-  const agents = [...state.agents.values()].sort((a, b) => a.name.localeCompare(b.name));
+  // Named personas first, then procedural, alphabetical within each group —
+  // makes the authored roster easy to find when the list is long.
+  const agents = [...state.agents.values()].sort((a, b) => {
+    if (a.named !== b.named) return a.named ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
   const filter = state.agentFilter;
   const frag = document.createDocumentFragment();
   for (const a of agents) {
     if (filter && !a.name.toLowerCase().includes(filter)) continue;
     const el = document.createElement('div');
-    el.className = 'agent-card';
+    el.className = a.named ? 'agent-card named' : 'agent-card';
 
     const row1 = document.createElement('div');
     row1.className = 'row1';
@@ -508,8 +524,15 @@ function renderAgents(): void {
     name.className = 'name';
     const sw = document.createElement('span');
     sw.className = 'swatch';
-    sw.style.background = agentColor(a.id);
+    sw.style.background = colorForAgent(a, a.id);
     name.appendChild(sw);
+    if (a.named) {
+      const star = document.createElement('span');
+      star.className = 'named-star';
+      star.title = 'named character';
+      star.textContent = '★';
+      name.appendChild(star);
+    }
     name.appendChild(document.createTextNode(a.name));
     const mood = document.createElement('span');
     mood.className = 'mood';
@@ -517,6 +540,13 @@ function renderAgents(): void {
     row1.appendChild(name);
     row1.appendChild(mood);
     el.appendChild(row1);
+
+    if (a.named && a.bio) {
+      const bio = document.createElement('div');
+      bio.className = 'bio';
+      bio.textContent = a.bio;
+      el.appendChild(bio);
+    }
 
     const intent = document.createElement('div');
     intent.className = 'intent';
@@ -633,6 +663,7 @@ function renderGraph(): void {
 
 const whisperAgentSel = document.getElementById('whisper-agent') as HTMLSelectElement;
 const whisperTextEl = document.getElementById('whisper-text') as HTMLInputElement;
+const agentNameListEl = document.getElementById('agent-names') as HTMLDataListElement;
 const whisperSendBtn = document.getElementById('whisper-send') as HTMLButtonElement;
 const whisperStatusEl = document.getElementById('whisper-status') as HTMLElement;
 const eventTextEl = document.getElementById('event-text') as HTMLInputElement;
@@ -652,16 +683,38 @@ adminTokenEl.addEventListener('input', () => {
 });
 
 function refreshInterventionControls(): void {
-  const sortedAgents = [...state.agents.values()].sort((a, b) => a.name.localeCompare(b.name));
+  // Named first, then procedural, alphabetical within each group. The same
+  // ordering as the agent list so "go find Mei" is always near the top.
+  const sortedAgents = [...state.agents.values()].sort((a, b) => {
+    if (a.named !== b.named) return a.named ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
   const prior = whisperAgentSel.value;
   whisperAgentSel.replaceChildren();
+  let insertedDivider = false;
   for (const a of sortedAgents) {
+    if (!a.named && !insertedDivider && sortedAgents.some((x) => x.named)) {
+      const sep = document.createElement('option');
+      sep.disabled = true;
+      sep.textContent = '—— procedural ——';
+      whisperAgentSel.appendChild(sep);
+      insertedDivider = true;
+    }
     const opt = document.createElement('option');
     opt.value = a.id;
-    opt.textContent = a.name;
+    opt.textContent = a.named ? `★ ${a.name}` : a.name;
     whisperAgentSel.appendChild(opt);
   }
   if (prior && sortedAgents.some((a) => a.id === prior)) whisperAgentSel.value = prior;
+
+  agentNameListEl.replaceChildren();
+  for (const a of sortedAgents) {
+    const opt = document.createElement('option');
+    opt.value = a.name;
+    if (a.bio) opt.label = a.bio;
+    agentNameListEl.appendChild(opt);
+  }
+
   for (const sel of [eventZoneSel, objectZoneSel]) {
     const priorZone = sel.value;
     const head = sel.firstElementChild as HTMLOptionElement | null;

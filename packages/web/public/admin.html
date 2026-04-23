@@ -116,6 +116,22 @@
         margin-bottom: 8px;
         background: rgba(255, 255, 255, 0.02);
       }
+      .agent-card.named {
+        border-color: rgba(255, 220, 120, 0.35);
+        background: rgba(255, 220, 120, 0.04);
+      }
+      .agent-card .named-star {
+        color: #f5c97a;
+        margin-right: 4px;
+        font-size: 11px;
+      }
+      .agent-card .bio {
+        font-size: 10px;
+        color: #c4b992;
+        margin-top: 2px;
+        line-height: 1.35;
+        font-style: italic;
+      }
       .agent-card .row1 {
         display: flex;
         justify-content: space-between;
@@ -318,7 +334,10 @@
       </section>
       <section>
         <h2>agents</h2>
-        <div class="filter"><input id="agent-filter" placeholder="filter by name…" /></div>
+        <div class="filter">
+          <input id="agent-filter" list="agent-names" placeholder="filter by name… (★ named)" />
+        </div>
+        <datalist id="agent-names"></datalist>
         <div class="scroll" id="agent-list"></div>
         <div style="padding: 10px 12px; border-top: 1px solid rgba(255,255,255,0.06);">
           <div class="intervene">
