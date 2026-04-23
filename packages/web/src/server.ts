@@ -609,6 +609,7 @@ async function main(): Promise<void> {
     }
     if (req.method === 'GET' && url.pathname === '/health') {
       const t = runtime.telemetrySnapshot();
+      const mem = process.memoryUsage();
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -626,6 +627,12 @@ async function main(): Promise<void> {
           actionsPerMinute: Math.round(t.actionsPerMinute),
           actions: t.actions,
           wallMs: Math.round(t.wallMs),
+          memoryMb: {
+            rss: Math.round(mem.rss / 1024 / 1024),
+            heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+            heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
+            external: Math.round(mem.external / 1024 / 1024),
+          },
           llmBudget: budget.state(),
         }),
       );
