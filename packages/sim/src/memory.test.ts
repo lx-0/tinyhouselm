@@ -92,7 +92,14 @@ describe('ParaMemory', () => {
 
   it('appendDailyNote is byte-equivalent to string-concat for 10k deferred appends', async () => {
     const root = await mkdtemp(join(tmpdir(), 'tina-mem-'));
-    const mem = new ParaMemory({ root, now: fixedNow, flushMode: 'deferred' });
+    // Opt out of the retention cap for this byte-equivalence guard — the cap
+    // is tested separately below.
+    const mem = new ParaMemory({
+      root,
+      now: fixedNow,
+      flushMode: 'deferred',
+      maxDailyLines: 50_000,
+    });
     const N = 10_000;
     let expected = '# 2026-04-18\n\n';
     for (let i = 0; i < N; i++) {
@@ -131,5 +138,92 @@ describe('ParaMemory', () => {
     }
     const elapsedMs = Date.now() - started;
     expect(elapsedMs).toBeLessThan(2000);
+  });
+
+  it('addFact caps retained facts and drops dispensable oldest first (TINA-110)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tina-mem-'));
+    const mem = new ParaMemory({ root, now: fixedNow, flushMode: 'deferred', maxFacts: 5 });
+    await mem.addFact({ fact: 'pref-1', category: 'preference' });
+    await mem.addFact({ fact: 'reflect-1', category: 'reflection' });
+    await mem.addFact({ fact: 'milestone-1', category: 'milestone' });
+    // Spam relationship facts — the conversation-close leaker.
+    for (let i = 0; i < 20; i++) {
+      await mem.addFact({ fact: `talked with peer-${i}`, category: 'relationship' });
+    }
+    const facts = await mem.readFacts();
+    expect(facts.length).toBeLessThanOrEqual(5);
+    // High-value categories must survive.
+    expect(facts.some((f) => f.category === 'reflection')).toBe(true);
+    expect(facts.some((f) => f.category === 'milestone')).toBe(true);
+    expect(facts.some((f) => f.category === 'preference')).toBe(true);
+    // Newest relationship fact must survive; oldest should be trimmed.
+    expect(facts.some((f) => f.fact === 'talked with peer-19')).toBe(true);
+    expect(facts.some((f) => f.fact === 'talked with peer-0')).toBe(false);
+  });
+
+  it('addFact cap survives far past cap without ballooning memory (TINA-110)', async () => {
+    // Simulates the dense-chatter steady state: 2000 conversation-close fact
+    // inserts into an agent memory. Post-fix, retained size stays bounded.
+    const root = await mkdtemp(join(tmpdir(), 'tina-mem-'));
+    const mem = new ParaMemory({ root, now: fixedNow, flushMode: 'deferred', maxFacts: 50 });
+    for (let i = 0; i < 2000; i++) {
+      await mem.addFact({
+        fact: `talked with peer: long transcript line ${i}`,
+        category: 'relationship',
+      });
+    }
+    const facts = await mem.readFacts();
+    expect(facts.length).toBeLessThanOrEqual(50);
+  });
+
+  it('addFact cap drops superseded facts before active ones', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tina-mem-'));
+    const mem = new ParaMemory({ root, now: fixedNow, flushMode: 'deferred', maxFacts: 3 });
+    const a = await mem.addFact({ fact: 'first', category: 'preference' });
+    const b = await mem.addFact({ fact: 'second', category: 'preference' });
+    // Supersede `a` → that entry becomes dead weight; new replacement goes in.
+    await mem.supersede(a.id, {
+      ...a,
+      id: 'self-supersede',
+      fact: 'first (revised)',
+      status: 'active',
+      superseded_by: null,
+    });
+    // Now force a trim by adding two more preferences.
+    await mem.addFact({ fact: 'third', category: 'preference' });
+    await mem.addFact({ fact: 'fourth', category: 'preference' });
+    const facts = await mem.readFacts();
+    expect(facts.length).toBeLessThanOrEqual(3);
+    // Superseded fact should be gone.
+    expect(facts.some((f) => f.id === a.id && f.status === 'superseded')).toBe(false);
+    // The replacement should survive as it's active.
+    expect(facts.some((f) => f.fact === 'first (revised)')).toBe(true);
+    // `b` is the oldest active preference — trim drops oldest among the
+    // remaining pool once superseded + dispensable runs out.
+    expect(facts.some((f) => f.fact === 'fourth')).toBe(true);
+    void b;
+  });
+
+  it('appendDailyNote caps buffered lines and keeps the header (TINA-110)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tina-mem-'));
+    const mem = new ParaMemory({
+      root,
+      now: fixedNow,
+      flushMode: 'deferred',
+      maxDailyLines: 10,
+    });
+    for (let i = 0; i < 1000; i++) {
+      await mem.appendDailyNote(`entry ${i}`);
+    }
+    await mem.flush();
+    const body = await readFile(join(root, 'memory/2026-04-18.md'), 'utf8');
+    // Header preserved.
+    expect(body.startsWith('# 2026-04-18\n\n')).toBe(true);
+    // Oldest entries dropped, newest retained.
+    expect(body).toContain('- entry 999');
+    expect(body).not.toContain('- entry 0\n');
+    // Total line count stays bounded.
+    const lineCount = body.split('\n').filter(Boolean).length;
+    expect(lineCount).toBeLessThanOrEqual(12);
   });
 });

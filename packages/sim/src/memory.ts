@@ -77,13 +77,31 @@ export interface ParaMemoryOptions {
    * Use deferred when the caller drives its own flush cadence (e.g. Runtime).
    */
   flushMode?: MemoryFlushMode;
+  /**
+   * Hard cap on retained facts per entity. When exceeded, `addFact` trims:
+   * superseded facts first, then oldest dispensable categories
+   * (observation/status/relationship), then oldest non-reflection.
+   * Reflections are preserved as long as possible. Default: 500.
+   */
+  maxFacts?: number;
+  /**
+   * Hard cap on buffered daily-note entries per day. When exceeded,
+   * `appendDailyNote` drops the oldest *appended* entries but always keeps
+   * the buffer's first element (the header / prior on-disk body). Default: 2000.
+   */
+  maxDailyLines?: number;
 }
+
+const DEFAULT_MAX_FACTS = 500;
+const DEFAULT_MAX_DAILY_LINES = 2000;
 
 export class ParaMemory {
   readonly root: string;
   readonly entity: string;
   private now: () => Date;
   private flushMode: MemoryFlushMode;
+  private readonly maxFacts: number;
+  private readonly maxDailyLines: number;
 
   private facts: MemoryFact[] | null = null;
   private factsDirty = false;
@@ -99,6 +117,8 @@ export class ParaMemory {
     this.entity = opts.entity ?? 'self';
     this.now = opts.now ?? (() => new Date());
     this.flushMode = opts.flushMode ?? 'eager';
+    this.maxFacts = Math.max(1, Math.floor(opts.maxFacts ?? DEFAULT_MAX_FACTS));
+    this.maxDailyLines = Math.max(2, Math.floor(opts.maxDailyLines ?? DEFAULT_MAX_DAILY_LINES));
   }
 
   private itemsPath(): string {
@@ -197,6 +217,9 @@ export class ParaMemory {
         : {}),
     };
     facts.push(fact);
+    if (facts.length > this.maxFacts) {
+      this.facts = trimFacts(facts, this.maxFacts);
+    }
     this.factsDirty = true;
     if (this.flushMode === 'eager') await this.writeFactsNow();
     return fact;
@@ -252,6 +275,12 @@ export class ParaMemory {
     const day = date ?? this.today();
     const buf = await this.loadDailyBuf(day);
     buf.push(`- ${text}\n`);
+    // Bound the in-memory buffer. `buf[0]` is the header or the prior on-disk
+    // body; we always keep it so repeated rewrites stay idempotent. Drop only
+    // oldest *appended* entries when over cap.
+    if (buf.length > this.maxDailyLines) {
+      buf.splice(1, buf.length - this.maxDailyLines);
+    }
     this.dailyDirty.add(day);
     if (this.flushMode === 'eager') await this.writeDailyNow(day);
   }
@@ -297,6 +326,52 @@ export class ParaMemory {
 function clampImportance(n: number): number {
   if (Number.isNaN(n)) return 3;
   return Math.min(10, Math.max(1, Math.round(n)));
+}
+
+const DISPENSABLE_CATEGORIES: ReadonlySet<FactCategory> = new Set<FactCategory>([
+  'observation',
+  'status',
+  'relationship',
+]);
+
+/**
+ * Bound the retained fact set when it grows past `maxFacts`. Strategy,
+ * in order until we're under cap:
+ *   1. Drop superseded facts (dead weight — nothing active reads them).
+ *   2. Drop oldest dispensable facts (observation / status / relationship).
+ *      These dominate in dense simulations because every conversation close
+ *      appends a `talked with X` relationship fact.
+ *   3. If still over cap, drop oldest non-reflection facts.
+ * Reflections are preserved as long as at least one non-reflection remains
+ * above the cap — they carry Park et al.-style high-importance signal that
+ * long-running agents rely on for decision-making.
+ */
+function trimFacts(facts: readonly MemoryFact[], maxFacts: number): MemoryFact[] {
+  let out = facts.filter((f) => f.status !== 'superseded');
+  if (out.length <= maxFacts) return [...out];
+
+  let drop = out.length - maxFacts;
+  const afterDispensable: MemoryFact[] = [];
+  for (const f of out) {
+    if (drop > 0 && DISPENSABLE_CATEGORIES.has(f.category)) {
+      drop -= 1;
+      continue;
+    }
+    afterDispensable.push(f);
+  }
+  out = afterDispensable;
+  if (out.length <= maxFacts) return out;
+
+  let extra = out.length - maxFacts;
+  const afterNonReflection: MemoryFact[] = [];
+  for (const f of out) {
+    if (extra > 0 && f.category !== 'reflection') {
+      extra -= 1;
+      continue;
+    }
+    afterNonReflection.push(f);
+  }
+  return afterNonReflection;
 }
 
 function tokenize(s: string): string[] {
