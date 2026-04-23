@@ -960,6 +960,89 @@ snapshotSaveBtn.addEventListener('click', () => {
 // Poll periodically so the status line stays fresh even when nothing else updates.
 setInterval(() => void fetchSnapshotStatus(), 15_000);
 
+interface StickyDailyRollup {
+  date: string;
+  sharesCreated: number;
+  momentUniqueVisits: number;
+  returningVisits24h: number;
+  returningVisits7d: number;
+}
+
+interface StickyMetricsPayload {
+  ok: boolean;
+  enabled: boolean;
+  rollup: StickyDailyRollup[];
+}
+
+const stickyBodyEl = document.getElementById('sticky-metrics-body') as HTMLElement;
+
+function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
+  if (!payload || !payload.ok) {
+    stickyBodyEl.textContent = 'unavailable';
+    stickyBodyEl.className = 'status err';
+    return;
+  }
+  if (!payload.enabled) {
+    stickyBodyEl.textContent = 'disabled';
+    stickyBodyEl.className = 'status';
+    return;
+  }
+  // Newest day on top — CEO reads today first, then trends down.
+  const rows = [...payload.rollup].reverse();
+  const today = rows[0]?.date;
+  const table = document.createElement('table');
+  table.className = 'sticky-table';
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th></tr>';
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const d of rows) {
+    const tr = document.createElement('tr');
+    if (d.date === today) tr.className = 'today';
+    const cells: Array<[string, boolean]> = [
+      [d.date.slice(5), false],
+      [String(d.sharesCreated), d.sharesCreated === 0],
+      [String(d.momentUniqueVisits), d.momentUniqueVisits === 0],
+      [String(d.returningVisits24h), d.returningVisits24h === 0],
+      [String(d.returningVisits7d), d.returningVisits7d === 0],
+    ];
+    for (const [text, isZero] of cells) {
+      const td = document.createElement('td');
+      td.textContent = text;
+      if (isZero) td.className = 'zero';
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  stickyBodyEl.className = '';
+  stickyBodyEl.replaceChildren(table);
+}
+
+async function fetchStickyMetrics(): Promise<void> {
+  try {
+    const headers: Record<string, string> = {};
+    const token = adminTokenEl.value.trim();
+    if (token) headers['x-admin-token'] = token;
+    const res = await fetch('/api/admin/sticky-metrics', { headers });
+    if (!res.ok) {
+      stickyBodyEl.textContent = `unavailable · http ${res.status}`;
+      stickyBodyEl.className = 'status err';
+      return;
+    }
+    const data = (await res.json()) as StickyMetricsPayload;
+    renderStickyMetrics(data);
+  } catch (err) {
+    stickyBodyEl.textContent = `unavailable · ${(err as Error).message}`;
+    stickyBodyEl.className = 'status err';
+  }
+}
+
+void fetchStickyMetrics();
+// Poll every 30s — counters tick on every visit, so a slow dashboard poll
+// is plenty for a CEO glance panel without hammering the server.
+setInterval(() => void fetchStickyMetrics(), 30_000);
+
 const toastEl = document.getElementById('toast') as HTMLElement;
 let toastTimer: number | null = null;
 function showToast(text: string, kind: 'ok' | 'err' = 'ok'): void {

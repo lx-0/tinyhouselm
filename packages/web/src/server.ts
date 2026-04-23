@@ -33,6 +33,12 @@ import {
   scheduleSnapshots,
 } from './snapshot-store.js';
 import { buildSnapshot } from './snapshot.js';
+import {
+  StickyMetrics,
+  buildVisitorSetCookie,
+  generateVisitorId,
+  parseVisitorCookie,
+} from './sticky-metrics.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..', '..');
@@ -65,6 +71,14 @@ const MOMENT_STORE_DIR = isAbsolute(MOMENT_STORE_DIR_ENV)
   : resolve(process.cwd(), MOMENT_STORE_DIR_ENV);
 const MOMENT_STORE_MAX = Number(process.env.MOMENT_STORE_MAX ?? 500);
 const MOMENT_PUBLIC_BASE_URL = process.env.MOMENT_PUBLIC_BASE_URL || null;
+
+// Share-loop return-rate instrumentation (TINA-145).
+const STICKY_METRICS_ENABLED =
+  (process.env.STICKY_METRICS_ENABLED ?? 'true').toLowerCase() !== 'false';
+const STICKY_METRICS_DIR_ENV = process.env.STICKY_METRICS_DIR ?? './data/sticky-metrics';
+const STICKY_METRICS_DIR = isAbsolute(STICKY_METRICS_DIR_ENV)
+  ? STICKY_METRICS_DIR_ENV
+  : resolve(process.cwd(), STICKY_METRICS_DIR_ENV);
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
@@ -354,6 +368,35 @@ async function main(): Promise<void> {
     });
   }
 
+  const stickyMetrics = STICKY_METRICS_ENABLED
+    ? new StickyMetrics({
+        dir: STICKY_METRICS_DIR,
+        log: (level, event, fields) => log[level](event, fields),
+      })
+    : null;
+  if (stickyMetrics) {
+    await stickyMetrics.load();
+    log.info('sticky.ready', {
+      dir: STICKY_METRICS_DIR,
+      days: stickyMetrics.dayCount(),
+      visitors: stickyMetrics.visitorCount(),
+    });
+  }
+
+  /**
+   * Read the `tvid` cookie and stamp a new one if absent. Returns the
+   * visitor id the counter-bump path should key on. Tiny surface by design:
+   * the only side-effect on the response is a single `Set-Cookie` header,
+   * which is safe to emit before `writeHead`.
+   */
+  const resolveVisitor = (req: IncomingMessage, res: ServerResponse): string => {
+    const existing = parseVisitorCookie(req.headers.cookie);
+    if (existing) return existing;
+    const id = generateVisitorId();
+    res.setHeader('set-cookie', buildVisitorSetCookie(id));
+    return id;
+  };
+
   runtime.setOnEvent((event: RuntimeEvent) => {
     switch (event.kind) {
       case 'plan_committed': {
@@ -499,6 +542,7 @@ async function main(): Promise<void> {
         onShare: () => {
           budget.record(0, 'admin:moment:share');
           log.info('admin.moment.share', {});
+          stickyMetrics?.recordShare();
         },
       })
     : null;
@@ -511,6 +555,10 @@ async function main(): Promise<void> {
     }
     const url = new URL(req.url, 'http://localhost');
     if (req.method === 'GET' && url.pathname === '/') {
+      if (stickyMetrics) {
+        const visitorId = resolveVisitor(req, res);
+        stickyMetrics.recordRootVisit(visitorId);
+      }
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(indexHtml);
       return;
@@ -537,6 +585,10 @@ async function main(): Promise<void> {
     if (momentRoutes) {
       if (req.method === 'GET' && url.pathname.startsWith('/moment/')) {
         const id = url.pathname.slice('/moment/'.length);
+        if (stickyMetrics) {
+          const visitorId = resolveVisitor(req, res);
+          stickyMetrics.recordMomentVisit(visitorId);
+        }
         momentRoutes.handleMomentPage(res, id, url.pathname);
         return;
       }
@@ -570,6 +622,24 @@ async function main(): Promise<void> {
       }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, status: snapshotStatus() }));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/admin/sticky-metrics') {
+      const auth = checkAdmin(req, adminToken);
+      if (!auth.ok) {
+        res.writeHead(auth.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: auth.error }));
+        return;
+      }
+      const rollup = stickyMetrics ? stickyMetrics.rollup(7) : [];
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          enabled: stickyMetrics !== null,
+          rollup,
+        }),
+      );
       return;
     }
     if (req.method === 'POST' && url.pathname === '/api/admin/snapshot/save') {
@@ -721,6 +791,17 @@ async function main(): Promise<void> {
           log.info('moments.shutdown_flush', { count: moments.count() });
         } catch (err) {
           log.error('moments.shutdown_flush.error', { err });
+        }
+      }
+      if (stickyMetrics) {
+        try {
+          await stickyMetrics.flush();
+          log.info('sticky.shutdown_flush', {
+            days: stickyMetrics.dayCount(),
+            visitors: stickyMetrics.visitorCount(),
+          });
+        } catch (err) {
+          log.error('sticky.shutdown_flush.error', { err });
         }
       }
     })();

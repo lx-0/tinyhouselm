@@ -347,6 +347,39 @@
         padding: 1px 6px;
         font-size: 10px;
       }
+      .sticky-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 10px;
+        margin-top: 6px;
+      }
+      .sticky-table th,
+      .sticky-table td {
+        padding: 3px 4px;
+        text-align: right;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      }
+      .sticky-table th {
+        color: #8888aa;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 9px;
+      }
+      .sticky-table td:first-child,
+      .sticky-table th:first-child {
+        text-align: left;
+        color: #b9b0dc;
+      }
+      .sticky-table tr.today td { color: #e7e5ee; }
+      .sticky-table .zero { color: #55556a; }
+      .sticky-footnote {
+        font-size: 9px;
+        color: #55556a;
+        margin-top: 4px;
+        font-family: ui-monospace, Menlo, monospace;
+      }
     </style>
   </head>
   <body>
@@ -380,6 +413,13 @@
         <div class="scroll" id="agent-list"></div>
         <div style="padding: 10px 12px; border-top: 1px solid rgba(255,255,255,0.06);">
           <div class="intervene">
+            <fieldset>
+              <legend>sticky metrics · 7d</legend>
+              <div id="sticky-metrics-body" class="status">loading…</div>
+              <div class="sticky-footnote">
+                shares · unique /moment visits · 24h + 7d returners (UTC days)
+              </div>
+            </fieldset>
             <fieldset>
               <legend>whisper</legend>
               <div class="row">

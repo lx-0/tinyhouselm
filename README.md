@@ -111,6 +111,30 @@ open http://localhost:8080
 
 Railway picks up `railway.toml` and the Dockerfile automatically.
 
+## Sticky metrics
+
+The admin panel surfaces a 7-day rollup of four counters behind `/admin`
+(disk-backed JSON, fire-and-forget writes, no external analytics, no raw IP
+storage — identity is a random 1-year `tvid` cookie). See TINA-145.
+
+- **shares** — successful `/admin` Share button mints (one per 200 response
+  from `POST /api/admin/moment/share`).
+- **uniq** — unique visitors that opened a `/moment/:id` page today, deduped
+  by `tvid`. Capped at 10,000/day; overflow bumps the counter without
+  growing the dedup set.
+- **24h** — visitors whose first return-day happened within 24h of their
+  first-ever visit. Counted at most once per visitor per calendar day (UTC).
+- **7d** — same, within 7 days. The 24h set is a strict subset of the 7d set
+  by construction, so 7d ≥ 24h on every row.
+
+Notes for future-me:
+
+- A "return" requires a new UTC calendar day. Same-day re-visits don't count.
+- Any page hit counts as a return — root `/` and `/moment/:id` both update
+  the visitor's last-seen. Share clicks don't touch the visitor table.
+- State persists in `STICKY_METRICS_DIR` (default `./data/sticky-metrics`).
+  Flip `STICKY_METRICS_ENABLED=false` to disable entirely.
+
 ## Milestones
 
 - `TINA-2` — architecture + bootstrap + hello-world tick loop ✅

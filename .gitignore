@@ -11,3 +11,6 @@ coverage
 # Per-agent para-memory runtime state
 world/agents/*/memory/*
 !world/agents/*/memory/.gitkeep
+
+# Web runtime state (snapshots, moments, sticky metrics)
+packages/web/data/
