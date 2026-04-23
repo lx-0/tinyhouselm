@@ -473,9 +473,30 @@ function renderConversations(): void {
     const meta = document.createElement('span');
     meta.className = 'meta';
     const simTime = row.closedAt ?? row.openedAt;
-    meta.textContent = row.live
+    const metaText = document.createElement('span');
+    metaText.textContent = row.live
       ? `live · ${row.transcript.length}t`
       : `${row.transcript.length}t · ${row.reason ?? 'closed'}`;
+    meta.appendChild(metaText);
+    // Share button — enabled once the session closes and we have a moment
+    // to link to. Multi-party only (solo rows get sessionId prefixes that
+    // the server won't recognize).
+    if (!row.sessionId.startsWith('solo:')) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'share-btn';
+      btn.dataset.sessionId = row.sessionId;
+      btn.disabled = row.live;
+      btn.textContent = row.live ? 'share (closed)' : 'share';
+      btn.title = row.live
+        ? 'moment is captured when this conversation closes'
+        : 'copy shareable moment URL';
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        void shareMoment(row.sessionId, btn);
+      });
+      meta.appendChild(btn);
+    }
     header.appendChild(parts);
     header.appendChild(meta);
     el.appendChild(header);
@@ -938,6 +959,97 @@ snapshotSaveBtn.addEventListener('click', () => {
 
 // Poll periodically so the status line stays fresh even when nothing else updates.
 setInterval(() => void fetchSnapshotStatus(), 15_000);
+
+const toastEl = document.getElementById('toast') as HTMLElement;
+let toastTimer: number | null = null;
+function showToast(text: string, kind: 'ok' | 'err' = 'ok'): void {
+  toastEl.textContent = text;
+  toastEl.className = kind === 'err' ? 'err show' : 'show';
+  if (toastTimer !== null) window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toastEl.classList.remove('show');
+  }, 2600);
+}
+
+async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  // Fallback for non-secure contexts / older browsers.
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  try {
+    document.execCommand('copy');
+  } finally {
+    document.body.removeChild(input);
+  }
+}
+
+async function shareMoment(sessionId: string, btn: HTMLButtonElement): Promise<void> {
+  btn.disabled = true;
+  const original = btn.textContent ?? 'share';
+  btn.textContent = '…';
+  try {
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    const token = adminTokenEl.value.trim();
+    if (token) headers['x-admin-token'] = token;
+    const res = await fetch('/api/admin/moment/share', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ sessionId }),
+    });
+    const raw = await res.text();
+    let parsed: { id?: string; url?: string; error?: string } = {};
+    try {
+      parsed = raw ? JSON.parse(raw) : {};
+    } catch {
+      parsed = {};
+    }
+    if (!res.ok) {
+      btn.className = 'share-btn err';
+      btn.textContent = 'share';
+      const msg =
+        res.status === 404
+          ? 'no moment yet — try again after the conversation closes'
+          : (parsed.error ?? `http ${res.status}`);
+      showToast(`✗ ${msg}`, 'err');
+      return;
+    }
+    const shareUrl =
+      parsed.url ?? (parsed.id ? `${window.location.origin}/moment/${parsed.id}` : '');
+    if (!shareUrl) {
+      btn.className = 'share-btn err';
+      btn.textContent = 'share';
+      showToast('✗ share returned no URL', 'err');
+      return;
+    }
+    try {
+      await copyToClipboard(shareUrl);
+      btn.className = 'share-btn ok';
+      btn.textContent = 'copied';
+      showToast(`✓ copied · ${shareUrl}`);
+    } catch {
+      btn.className = 'share-btn';
+      btn.textContent = 'share';
+      showToast(`link: ${shareUrl}`);
+    }
+    window.setTimeout(() => {
+      btn.className = 'share-btn';
+      btn.textContent = original;
+    }, 2000);
+  } catch (err) {
+    btn.className = 'share-btn err';
+    btn.textContent = 'share';
+    showToast(`✗ ${(err as Error).message}`, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 async function bootstrap(): Promise<void> {
   try {
