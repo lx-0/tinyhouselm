@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import type { TileMap, Vec2 } from '@tina/shared';
 import { SimulationClock } from './clock.js';
 import { ParaMemory } from './memory.js';
+import { loadAllPersonas, seedNamedPersonaMemories } from './named-personas.js';
 import { describeAction } from './perception.js';
 import { seededRng } from './rng.js';
 import { Runtime, type RuntimeEvent } from './runtime.js';
@@ -116,19 +117,44 @@ Flags:
 `);
 }
 
-async function loadSkills(opts: CliOptions): Promise<SkillDocument[]> {
-  const loaded: SkillDocument[] = [];
+const NAMED_PERSONAS_DIR = resolve(REPO_ROOT, 'packages', 'sim', 'personas', 'named');
+
+async function loadSkills(opts: CliOptions): Promise<{
+  skills: SkillDocument[];
+  memoryRootFor: (id: string) => string;
+}> {
   if (opts.skillPaths.length > 0) {
-    for (const p of opts.skillPaths) loaded.push(await loadSkill(p));
-  } else {
-    const all = await loadAllSkills(opts.agentsDir);
-    loaded.push(...all);
+    // Explicit --skill paths bypass the named+procedural merge; they're
+    // expected to carry their own memory dir next to each SKILL.md.
+    const docs: SkillDocument[] = [];
+    for (const p of opts.skillPaths) docs.push(await loadSkill(p));
+    const filtered = opts.include ? docs.filter((s) => new Set(opts.include!).has(s.id)) : docs;
+    return {
+      skills: filtered,
+      memoryRootFor: (id) => {
+        const s = filtered.find((x) => x.id === id);
+        return s ? `${skillDirectory(s)}/memory` : resolve(opts.agentsDir, id, 'memory');
+      },
+    };
   }
+  const loaded = await loadAllPersonas({
+    namedManifestDir: NAMED_PERSONAS_DIR,
+    proceduralDir: opts.agentsDir,
+  });
+  await seedNamedPersonaMemories(loaded.named);
   if (opts.include) {
     const wanted = new Set(opts.include);
-    return loaded.filter((s) => wanted.has(s.id));
+    const filtered = loaded.skills.filter((s) => wanted.has(s.id));
+    // Guarantee named ids stay even if filter order dropped them; preserves
+    // the "named personas always present" contract from TINA-27.
+    for (const np of loaded.named) {
+      if (wanted.has(np.manifest.id) && !filtered.some((s) => s.id === np.manifest.id)) {
+        filtered.unshift(np.skill);
+      }
+    }
+    return { skills: filtered, memoryRootFor: loaded.memoryRootFor };
   }
-  return loaded;
+  return { skills: loaded.skills, memoryRootFor: loaded.memoryRootFor };
 }
 
 function spawnAnchorsFromMap(map: TileMap): Vec2[] {
@@ -183,7 +209,7 @@ function formatEvent(event: RuntimeEvent): string {
 
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
-  const skills = await loadSkills(opts);
+  const { skills, memoryRootFor } = await loadSkills(opts);
   if (skills.length === 0) {
     console.error(
       `no personas found. Checked ${resolve(opts.agentsDir)}${
@@ -221,7 +247,7 @@ async function main(): Promise<void> {
     return {
       skill,
       memory: new ParaMemory({
-        root: `${skillDirectory(skill)}/memory`,
+        root: memoryRootFor(skill.id),
         flushMode: 'deferred',
       }),
       initial: {

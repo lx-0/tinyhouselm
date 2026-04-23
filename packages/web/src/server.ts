@@ -13,10 +13,10 @@ import {
   createGatewaySynthesizer,
   createLlmSynthesizer,
   homeForAgent,
-  loadAllSkills,
+  loadAllPersonas,
   nearestWalkable,
+  seedNamedPersonaMemories,
   seededRng,
-  skillDirectory,
 } from '@tina/sim';
 import { build as esbuild } from 'esbuild';
 import { createBudget, resolveBudgetCap } from './budget.js';
@@ -122,10 +122,20 @@ async function main(): Promise<void> {
   const adminJs = await bundleClient('admin.ts');
 
   const agentsDir = resolve(REPO_ROOT, 'world', 'agents');
-  const skills = await loadAllSkills(agentsDir);
+  const namedDir = resolve(REPO_ROOT, 'packages', 'sim', 'personas', 'named');
+  const { skills, named, memoryRootFor } = await loadAllPersonas({
+    namedManifestDir: namedDir,
+    proceduralDir: agentsDir,
+  });
   if (skills.length === 0) {
-    throw new Error(`no personas found under ${agentsDir}`);
+    throw new Error(`no personas found under ${agentsDir} (named dir: ${namedDir})`);
   }
+  const seeded = await seedNamedPersonaMemories(named);
+  if (seeded.length > 0) log.info('web.named.seeded', { ids: seeded });
+  log.info('web.named.loaded', {
+    named: named.length,
+    procedural: skills.length - named.length,
+  });
 
   const tileMap = buildStarterTown();
   const positionRng = seededRng(`positions:${SEED}`);
@@ -149,7 +159,7 @@ async function main(): Promise<void> {
     return {
       skill,
       memory: new ParaMemory({
-        root: `${skillDirectory(skill)}/memory`,
+        root: memoryRootFor(skill.id),
         flushMode: 'deferred',
       }),
       initial: { position: { ...safe } },
