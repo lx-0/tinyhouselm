@@ -25,7 +25,8 @@ interface AgentView {
   moveDurMs: number;
   facing: 'N' | 'S' | 'E' | 'W';
   action: string;
-  color: { body: string; head: string };
+  color: { body: string; head: string; accent: string };
+  named: boolean;
   speech: { text: string; until: number } | null;
 }
 
@@ -76,12 +77,40 @@ function hashHue(id: string): number {
   return h % 360;
 }
 
-function agentColor(id: string): { body: string; head: string } {
+function agentColor(id: string): { body: string; head: string; accent: string } {
   const h = hashHue(id);
   return {
     body: `hsl(${h} 65% 52%)`,
     head: `hsl(${(h + 22) % 360} 70% 78%)`,
+    accent: `hsl(${h} 75% 72%)`,
   };
+}
+
+/**
+ * Named personas get their authored hex body color + a lightened head and
+ * named-accent ring, so they're visually findable in the crowd (TINA-27).
+ * Procedural personas fall back to the deterministic hash palette.
+ */
+function resolveAgentColor(snap: AgentSnap): { body: string; head: string; accent: string } {
+  if (snap.named && snap.color) {
+    const body = snap.color;
+    const head = lightenHex(body, 0.22) ?? body;
+    const accent = snap.accent ?? lightenHex(body, 0.35) ?? body;
+    return { body, head, accent };
+  }
+  return agentColor(snap.id);
+}
+
+/** Mix a hex color toward white. Returns null if the input isn't parseable. */
+function lightenHex(hex: string, amount: number): string | null {
+  const m = hex.match(/^#([0-9a-fA-F]{6})$/);
+  if (!m) return null;
+  const n = Number.parseInt(m[1]!, 16);
+  const r = Math.min(255, Math.round(((n >> 16) & 0xff) + 255 * amount));
+  const g = Math.min(255, Math.round(((n >> 8) & 0xff) + 255 * amount));
+  const b = Math.min(255, Math.round((n & 0xff) + 255 * amount));
+  const hh = (v: number) => v.toString(16).padStart(2, '0');
+  return `#${hh(r)}${hh(g)}${hh(b)}`;
 }
 
 function appendLog(line: string): void {
@@ -106,7 +135,8 @@ function upsertAgent(snap: AgentSnap): void {
       moveDurMs: 0,
       facing: snap.facing,
       action: snap.currentAction,
-      color: agentColor(snap.id),
+      color: resolveAgentColor(snap),
+      named: !!snap.named,
       speech: null,
     });
     return;
@@ -118,6 +148,8 @@ function upsertAgent(snap: AgentSnap): void {
   existing.zone = snap.zone ?? null;
   existing.facing = snap.facing;
   existing.action = snap.currentAction;
+  existing.color = resolveAgentColor(snap);
+  existing.named = !!snap.named;
 }
 
 function applySnapshot(snapshot: Snapshot): void {
@@ -429,6 +461,21 @@ function draw(): void {
     ctx.ellipse(px + TILE / 2, py + TILE - 3, 7, 2.5, 0, 0, Math.PI * 2);
     ctx.fill();
 
+    // Named-persona halo: subtle glow + accent ring under the body so these
+    // characters are visually findable in the crowd without changing their
+    // sprite shape. Procedural agents get no ring.
+    if (a.named) {
+      ctx.fillStyle = `${a.color.accent}40`;
+      ctx.beginPath();
+      ctx.arc(px + TILE / 2, py + TILE - 3, 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = a.color.accent;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(px + TILE / 2, py + TILE - 3, 8.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
     ctx.fillStyle = a.color.body;
     ctx.fillRect(px + TILE / 2 - 4, py + 10, 8, 10);
     ctx.fillStyle = a.color.head;
@@ -451,7 +498,8 @@ function draw(): void {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
     ctx.font = '9px ui-monospace, Menlo, monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(a.name.split(' ')[0] ?? a.id, px + TILE / 2, py - 2);
+    const label = a.named ? `★ ${a.name.split(' ')[0] ?? a.id}` : (a.name.split(' ')[0] ?? a.id);
+    ctx.fillText(label, px + TILE / 2, py - 2);
     ctx.textAlign = 'left';
 
     if (a.speech && a.speech.until > now) {

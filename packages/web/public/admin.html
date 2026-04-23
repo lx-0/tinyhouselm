@@ -89,7 +89,46 @@
         margin-bottom: 6px;
       }
       .conv .participants { color: #e7e5ee; font-weight: 500; }
-      .conv .meta { color: #8888aa; font-family: ui-monospace, Menlo, monospace; }
+      .conv .meta { color: #8888aa; font-family: ui-monospace, Menlo, monospace; display: flex; gap: 8px; align-items: center; }
+      .conv .share-btn {
+        background: rgba(185, 176, 220, 0.12);
+        border: 1px solid rgba(185, 176, 220, 0.3);
+        color: #e7e5ee;
+        border-radius: 3px;
+        padding: 2px 8px;
+        font-family: inherit;
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        cursor: pointer;
+      }
+      .conv .share-btn:hover { background: rgba(185, 176, 220, 0.26); }
+      .conv .share-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+      .conv .share-btn.ok { background: rgba(140, 207, 163, 0.25); border-color: rgba(140, 207, 163, 0.5); }
+      .conv .share-btn.err { background: rgba(232, 140, 140, 0.2); border-color: rgba(232, 140, 140, 0.45); }
+      #toast {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%) translateY(10px);
+        padding: 8px 14px;
+        background: rgba(185, 176, 220, 0.18);
+        border: 1px solid rgba(185, 176, 220, 0.42);
+        border-radius: 6px;
+        color: #e7e5ee;
+        font-size: 11px;
+        font-family: ui-monospace, Menlo, monospace;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 180ms ease, transform 180ms ease;
+        z-index: 50;
+        max-width: 520px;
+      }
+      #toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+      #toast.err { background: rgba(232, 140, 140, 0.18); border-color: rgba(232, 140, 140, 0.42); }
       .turn {
         font-size: 11px;
         line-height: 1.45;
@@ -115,6 +154,22 @@
         padding: 10px 12px;
         margin-bottom: 8px;
         background: rgba(255, 255, 255, 0.02);
+      }
+      .agent-card.named {
+        border-color: rgba(255, 220, 120, 0.35);
+        background: rgba(255, 220, 120, 0.04);
+      }
+      .agent-card .named-star {
+        color: #f5c97a;
+        margin-right: 4px;
+        font-size: 11px;
+      }
+      .agent-card .bio {
+        font-size: 10px;
+        color: #c4b992;
+        margin-top: 2px;
+        line-height: 1.35;
+        font-style: italic;
       }
       .agent-card .row1 {
         display: flex;
@@ -318,7 +373,10 @@
       </section>
       <section>
         <h2>agents</h2>
-        <div class="filter"><input id="agent-filter" placeholder="filter by name…" /></div>
+        <div class="filter">
+          <input id="agent-filter" list="agent-names" placeholder="filter by name… (★ named)" />
+        </div>
+        <datalist id="agent-names"></datalist>
         <div class="scroll" id="agent-list"></div>
         <div style="padding: 10px 12px; border-top: 1px solid rgba(255,255,255,0.06);">
           <div class="intervene">
@@ -367,6 +425,7 @@
         </div>
       </section>
     </main>
+    <div id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="/admin.js"></script>
   </body>
 </html>

@@ -12,6 +12,21 @@ export {
   skillSlugFromPath,
 } from './skills.js';
 export type { SkillDocument, SkillFrontmatter } from './skills.js';
+export {
+  loadAllPersonas,
+  loadNamedPersonas,
+  manifestToSkill,
+  seedNamedPersonaMemories,
+} from './named-personas.js';
+export type {
+  LoadAllPersonasOptions,
+  LoadedPersonas,
+  LoadNamedPersonasOptions,
+  NamedPersona,
+  NamedPersonaGlyph,
+  NamedPersonaManifest,
+  NamedPersonaSeedMemory,
+} from './named-personas.js';
 export { ParaMemory, DEFAULT_IMPORTANCE } from './memory.js';
 export type {
   MemoryFact,

@@ -294,13 +294,19 @@ export class Runtime {
   }
 
   private spawn(entry: RuntimeAgent): Agent {
+    const meta = entry.skill.metadata;
+    const named = meta.named === 'true';
     const agent = new Agent(
       {
         id: entry.skill.id,
         name: entry.skill.displayName,
         description: entry.skill.description,
         body: entry.skill.body,
-        metadata: entry.skill.metadata,
+        metadata: meta,
+        named,
+        color: named ? (meta.glyph_color ?? null) : null,
+        accent: named ? (meta.glyph_accent ?? null) : null,
+        bio: named ? (meta.bio ?? null) : null,
       },
       entry.initial ?? {},
     );

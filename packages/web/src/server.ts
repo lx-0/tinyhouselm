@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { type IncomingMessage, type ServerResponse, createServer } from 'node:http';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Delta, Vec2 } from '@tina/shared';
+import { type Delta, type Vec2, deriveWorldClock } from '@tina/shared';
 import {
   ParaMemory,
   Runtime,
@@ -13,15 +13,17 @@ import {
   createGatewaySynthesizer,
   createLlmSynthesizer,
   homeForAgent,
-  loadAllSkills,
+  loadAllPersonas,
   nearestWalkable,
+  seedNamedPersonaMemories,
   seededRng,
-  skillDirectory,
 } from '@tina/sim';
 import { build as esbuild } from 'esbuild';
 import { createBudget, resolveBudgetCap } from './budget.js';
 import { InterventionHandlers } from './intervention.js';
 import { log } from './logger.js';
+import { MomentRoutes } from './moment-routes.js';
+import { MomentStore } from './moments.js';
 import { ObservabilityStore } from './observability.js';
 import { mergeReflectionOptions, resolveReflectionTunables } from './reflection-config.js';
 import {
@@ -54,6 +56,15 @@ const SIM_SNAPSHOT_DIR_ENV = process.env.SIM_SNAPSHOT_DIR ?? './data/snapshots';
 const SIM_SNAPSHOT_DIR = isAbsolute(SIM_SNAPSHOT_DIR_ENV)
   ? SIM_SNAPSHOT_DIR_ENV
   : resolve(process.cwd(), SIM_SNAPSHOT_DIR_ENV);
+
+// Moment / share configuration (TINA-29).
+const MOMENT_STORE_ENABLED = (process.env.MOMENT_STORE_ENABLED ?? 'true').toLowerCase() !== 'false';
+const MOMENT_STORE_DIR_ENV = process.env.MOMENT_STORE_DIR ?? './data/moments';
+const MOMENT_STORE_DIR = isAbsolute(MOMENT_STORE_DIR_ENV)
+  ? MOMENT_STORE_DIR_ENV
+  : resolve(process.cwd(), MOMENT_STORE_DIR_ENV);
+const MOMENT_STORE_MAX = Number(process.env.MOMENT_STORE_MAX ?? 500);
+const MOMENT_PUBLIC_BASE_URL = process.env.MOMENT_PUBLIC_BASE_URL || null;
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
@@ -122,10 +133,20 @@ async function main(): Promise<void> {
   const adminJs = await bundleClient('admin.ts');
 
   const agentsDir = resolve(REPO_ROOT, 'world', 'agents');
-  const skills = await loadAllSkills(agentsDir);
+  const namedDir = resolve(REPO_ROOT, 'packages', 'sim', 'personas', 'named');
+  const { skills, named, memoryRootFor } = await loadAllPersonas({
+    namedManifestDir: namedDir,
+    proceduralDir: agentsDir,
+  });
   if (skills.length === 0) {
-    throw new Error(`no personas found under ${agentsDir}`);
+    throw new Error(`no personas found under ${agentsDir} (named dir: ${namedDir})`);
   }
+  const seeded = await seedNamedPersonaMemories(named);
+  if (seeded.length > 0) log.info('web.named.seeded', { ids: seeded });
+  log.info('web.named.loaded', {
+    named: named.length,
+    procedural: skills.length - named.length,
+  });
 
   const tileMap = buildStarterTown();
   const positionRng = seededRng(`positions:${SEED}`);
@@ -149,7 +170,7 @@ async function main(): Promise<void> {
     return {
       skill,
       memory: new ParaMemory({
-        root: `${skillDirectory(skill)}/memory`,
+        root: memoryRootFor(skill.id),
         flushMode: 'deferred',
       }),
       initial: { position: { ...safe } },
@@ -258,6 +279,57 @@ async function main(): Promise<void> {
   for (const skill of skills) nameById.set(skill.id, skill.displayName);
   const displayName = (id: string) => nameById.get(id) ?? id;
 
+  // Per-agent visual + display metadata so captured moments can render
+  // standalone without any live runtime state (TINA-29).
+  const agentMeta = new Map<string, { name: string; named: boolean; color: string | null }>();
+  for (const skill of skills) {
+    const meta = skill.metadata;
+    const named = meta.named === 'true';
+    agentMeta.set(skill.id, {
+      name: skill.displayName,
+      named,
+      color: named ? (meta.glyph_color ?? null) : null,
+    });
+  }
+  const participantSnap = (id: string) => {
+    const m = agentMeta.get(id);
+    return {
+      id,
+      name: m?.name ?? id,
+      named: m?.named ?? false,
+      color: m?.color ?? null,
+    };
+  };
+
+  // Resolve the zone a conversation took place in by looking at where the
+  // participants currently stand. Uses the first participant's zone that
+  // resolves to a non-null value — participants that close due to drift will
+  // often return `null` on the first one, so we try each before giving up.
+  const zoneForParticipants = (ids: string[]): string | null => {
+    for (const id of ids) {
+      const agent = world.listAgents().find((a) => a.def.id === id);
+      if (agent?.state.zone) return agent.state.zone;
+    }
+    return null;
+  };
+
+  const moments = MOMENT_STORE_ENABLED
+    ? new MomentStore({
+        dir: MOMENT_STORE_DIR,
+        maxMoments: MOMENT_STORE_MAX,
+        log: (level, event, fields) => log[level](event, fields),
+      })
+    : null;
+  if (moments) {
+    await moments.load();
+    log.info('moments.ready', {
+      dir: MOMENT_STORE_DIR,
+      max: MOMENT_STORE_MAX,
+      loaded: moments.count(),
+      publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+    });
+  }
+
   runtime.setOnEvent((event: RuntimeEvent) => {
     switch (event.kind) {
       case 'plan_committed': {
@@ -329,18 +401,49 @@ async function main(): Promise<void> {
           trigger: event.trigger,
           simTime: event.simTime,
         });
+        // Stitch the reflection into the most recent moment whose
+        // participants include this agent — gives the /moment/:id page the
+        // "what they took away" line the spec asks for.
+        moments?.attachReflection({
+          reflectionId: event.reflectionId,
+          agentId: event.agentId,
+          summary: event.summary,
+          sourceCount: event.sourceCount,
+          trigger: event.trigger,
+          simTime: event.simTime,
+        });
         return;
       }
       case 'conversation_close': {
+        const participants = [...event.participants];
+        const transcript = event.transcript.map((t) => ({ ...t }));
+        const openedAt = event.transcript[0]?.at ?? event.simTime;
         observability.recordConversation({
           sessionId: event.sessionId,
-          participants: [...event.participants],
-          participantNames: event.participants.map((id) => displayName(id)),
-          transcript: event.transcript.map((t) => ({ ...t })),
-          openedAt: event.transcript[0]?.at ?? event.simTime,
+          participants,
+          participantNames: participants.map((id) => displayName(id)),
+          transcript,
+          openedAt,
           closedAt: event.simTime,
           reason: event.reason,
         });
+        // Skip solo "conversations" — every session we capture needs at
+        // least two participants for the headline to read right.
+        if (moments && participants.length >= 2) {
+          const zone = zoneForParticipants(participants);
+          moments.captureClose(
+            {
+              sessionId: event.sessionId,
+              simTime: event.simTime,
+              openedAt,
+              transcript,
+              participants: participants.map(participantSnap),
+              zone,
+              closeReason: event.reason,
+            },
+            deriveWorldClock(event.simTime, clock.speed),
+          );
+        }
         return;
       }
     }
@@ -363,6 +466,18 @@ async function main(): Promise<void> {
 
   const snapshotStatus = (): SnapshotStatus | null =>
     snapshotScheduler ? snapshotScheduler.status() : null;
+
+  const momentRoutes = moments
+    ? new MomentRoutes({
+        store: moments,
+        publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+        checkAdmin: (req) => checkAdmin(req, adminToken),
+        onShare: () => {
+          budget.record(0, 'admin:moment:share');
+          log.info('admin.moment.share', {});
+        },
+      })
+    : null;
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
@@ -394,6 +509,22 @@ async function main(): Promise<void> {
     if (req.method === 'POST' && url.pathname.startsWith('/api/admin/intervention/')) {
       const handled = await interventionHandlers.tryHandle(req, res, url.pathname);
       if (handled) return;
+    }
+    if (momentRoutes) {
+      if (req.method === 'GET' && url.pathname.startsWith('/moment/')) {
+        const id = url.pathname.slice('/moment/'.length);
+        momentRoutes.handleMomentPage(res, id, url.pathname);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/api/moments/')) {
+        const id = url.pathname.slice('/api/moments/'.length);
+        momentRoutes.handleMomentJson(res, id);
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/admin/moment/share') {
+        await momentRoutes.handleShare(req, res);
+        return;
+      }
     }
     if (req.method === 'GET' && url.pathname === '/api/admin/bootstrap') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -552,6 +683,14 @@ async function main(): Promise<void> {
           log.error('sim.snapshot.shutdown_save.error', { err });
         }
         snapshotScheduler.dispose();
+      }
+      if (moments) {
+        try {
+          await moments.flush();
+          log.info('moments.shutdown_flush', { count: moments.count() });
+        } catch (err) {
+          log.error('moments.shutdown_flush.error', { err });
+        }
       }
     })();
     server.close(() => process.exit(0));
