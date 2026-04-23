@@ -34,6 +34,52 @@ export function dayPhaseForHour(hour: number): DayPhase {
   return 'night';
 }
 
+/**
+ * Build a deterministic one-line headline for a moment (TINA-29). Derived
+ * purely from participants + zone + transcript length + clock — no LLM on
+ * the hot path. Examples:
+ *
+ *   "Mei and Hiro talked in the cafe at 3:14pm"
+ *   "Ava walked past Bruno near the park at 7:02am"
+ *   "Kenji muttered to himself in the plaza at 11:30pm"
+ */
+export function buildMomentHeadline(input: {
+  participants: Array<{ name: string }>;
+  zone: string | null;
+  transcriptLength: number;
+  clock: Pick<WorldClock, 'hour' | 'minute'>;
+}): string {
+  const names = input.participants.map((p) => p.name).filter((n) => n.length > 0);
+  const whoPart =
+    names.length === 0
+      ? 'Someone'
+      : names.length === 1
+        ? `${names[0]} muttered to themselves`
+        : names.length === 2
+          ? `${names[0]} and ${names[1]}`
+          : `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
+
+  const verb =
+    names.length <= 1
+      ? ''
+      : input.transcriptLength <= 2
+        ? ' crossed paths'
+        : input.transcriptLength <= 6
+          ? ' talked'
+          : ' argued';
+
+  const zonePart = input.zone ? ` in the ${input.zone}` : '';
+  const timePart = ` at ${formatTimeOfDay(input.clock.hour, input.clock.minute)}`;
+  return `${whoPart}${verb}${zonePart}${timePart}`;
+}
+
+function formatTimeOfDay(hour: number, minute: number): string {
+  const h12 = ((hour + 11) % 12) + 1;
+  const suffix = hour < 12 ? 'am' : 'pm';
+  const mm = String(minute).padStart(2, '0');
+  return `${h12}:${mm}${suffix}`;
+}
+
 export type AgentAction =
   | { kind: 'move_to'; to: Vec2 }
   | { kind: 'goto'; target: Vec2; label?: string; affordance?: Affordance }
@@ -208,6 +254,50 @@ export type Delta =
     };
 
 export type StreamMessage = Snapshot | Delta;
+
+/**
+ * Shareable moment record (TINA-29). Captured when a conversation closes so
+ * visitors can grab a URL that preserves that exact scene: the participants,
+ * their zone, the transcript, and — if one landed shortly after — the
+ * reflection the close triggered.
+ */
+export type MomentParticipant = {
+  id: string;
+  name: string;
+  named: boolean;
+  color: string | null;
+};
+
+export type MomentReflection = {
+  reflectionId: string;
+  agentId: string;
+  summary: string;
+  sourceCount: number;
+  trigger: 'day_rollover' | 'importance_budget' | 'manual';
+  simTime: SimTime;
+};
+
+export const MOMENT_RECORD_VERSION = 1;
+
+export type MomentRecord = {
+  version: number;
+  id: string;
+  sessionId: string;
+  /** Deterministic single-sentence label. See `buildMomentHeadline`. */
+  headline: string;
+  /** Sim clock at capture time. */
+  simTime: SimTime;
+  clock: WorldClock;
+  /** Wall-clock ISO timestamp when the record was built. */
+  capturedAt: string;
+  zone: string | null;
+  participants: MomentParticipant[];
+  transcript: ConversationTurn[];
+  openedAt: SimTime;
+  closedAt: SimTime;
+  closeReason: 'drifted' | 'idle' | 'aged';
+  reflection: MomentReflection | null;
+};
 
 /** Current save file schema version. Bump on any incompatible field change. */
 export const WORLD_STATE_SNAPSHOT_VERSION = 1;
