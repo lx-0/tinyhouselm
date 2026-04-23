@@ -36,9 +36,11 @@ Ordered by impact. `TINA-17` first because it's the single biggest lever on rete
 - `TINA-20` — **Env knobs for reflection cadence. ✅** Reflection importance budget, window size, and minFacts are tunable via env vars for low-throughput demos.
 - `TINA-27` — **Named characters. ✅** _(v0.4 closer.)_ Curated authored personas live alongside procedural ones: five hand-tuned characters (Mei, Hiro, Ava, Bruno, Kenji) with authored glyph colors, seed memories, and one-line bios. Named personas always load first, render with a `★` halo in the world view, get a labeled card in `/admin`, and autocomplete by name in the intervention form. Procedural fills stay deterministic from the seed. _(The doc's original "TINA-19 — Named characters" item.)_
 
-## v0.5 — "Make it sticky" (placeholder)
+## v0.5 — "Make it sticky"
 
-Next momentum-check target. Concrete scope is TBD by the CEO but the shape is: once visitors can act on the world and find named entry points, the remaining gap is giving them a reason to come back. Candidates: persistent visitor identity, shareable moment URLs, richer schedules for named characters, or a second authored town. The CEO's next momentum routine should pick one and scope it.
+Goal: when something memorable happens, a visitor can grab a link that captures that moment and send it to a friend. The share loop doubles as an acquisition loop.
+
+- `TINA-29` — **Shareable moment URLs. (opener)** Conversations persist a compact moment record on close (timestamp, zone, participants, transcript, optional reflection, deterministic headline). A public `/moment/:id` page renders a read-only view with OG meta tags for rich link previews. `/admin` conversation cards gain a *Share* button that copies the URL to clipboard. Disk-backed LRU (default 500) survives restart; no LLM on the hot path; per-IP rate limit on the share endpoint.
 
 ## Non-goals (explicit)
 
