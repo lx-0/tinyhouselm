@@ -20,6 +20,7 @@ const zones: Zone[] = [
   { name: 'cafe', x: 0, y: 0, width: 4, height: 4 },
   { name: 'park', x: 6, y: 0, width: 4, height: 4 },
   { name: 'home', x: 0, y: 6, width: 4, height: 4 },
+  { name: 'work', x: 6, y: 6, width: 4, height: 4 },
 ];
 
 function skillFor(name: string, description: string): SkillDocument {
@@ -332,5 +333,125 @@ describe('plan', () => {
     expect(morning.startHour).toBeGreaterThanOrEqual(9);
     // Early morning hours before the wake time fall back to the last block (night).
     expect(activeBlock(plan, 3)?.id).toBe('night');
+  });
+
+  it('authored hourSchedule drives per-hour preferredZone and intent (TINA-100)', () => {
+    const schedule = new Map<
+      number,
+      { hour: number; zone: 'cafe' | 'park' | 'work' | 'home' | null; intent: string }
+    >();
+    for (let h = 0; h < 24; h++) {
+      if (h >= 6 && h <= 8) schedule.set(h, { hour: h, zone: 'cafe', intent: 'cafe morning' });
+      else if (h >= 9 && h <= 17)
+        schedule.set(h, { hour: h, zone: 'work', intent: 'library shift' });
+      else if (h === 18) schedule.set(h, { hour: h, zone: 'park', intent: 'evening park walk' });
+      else schedule.set(h, { hour: h, zone: 'home', intent: 'at home' });
+    }
+    const plan = generateDayPlan({
+      persona: skillFor('mei', 'librarian'),
+      zones,
+      day: 0,
+      simTime: 0,
+      hourSchedule: schedule,
+    });
+
+    // activeBlock picks up the authored zone + intent at every sampled hour.
+    expect(activeBlock(plan, 7)?.preferredZone).toBe('cafe');
+    expect(activeBlock(plan, 7)?.intent).toBe('cafe morning');
+    expect(activeBlock(plan, 12)?.preferredZone).toBe('work');
+    expect(activeBlock(plan, 12)?.intent).toBe('library shift');
+    expect(activeBlock(plan, 18)?.preferredZone).toBe('park');
+    expect(activeBlock(plan, 18)?.intent).toBe('evening park walk');
+    expect(activeBlock(plan, 22)?.preferredZone).toBe('home');
+
+    // Runs of identical hours coalesce into single blocks so we don't churn
+    // 24 consecutive PlanBlocks when a persona sleeps all night.
+    const libraryBlock = plan.blocks.find((b) => b.intent === 'library shift');
+    expect(libraryBlock?.startHour).toBe(9);
+    expect(libraryBlock?.endHour).toBe(18);
+    expect(plan.blocks.length).toBeLessThan(24);
+
+    // Block ids mark these as authored so downstream diagnostics can tell
+    // archetype-inferred plans from schedule-driven ones.
+    expect(plan.blocks.every((b) => b.id.startsWith('authored-'))).toBe(true);
+  });
+
+  it('authored schedule with a gap borrows the archetype block for missing hours', () => {
+    // Only author 09..17; the remaining hours should still produce a plan
+    // because they fall back to the inferred archetype block for that hour.
+    const schedule = new Map<
+      number,
+      { hour: number; zone: 'cafe' | 'park' | 'work' | 'home' | null; intent: string }
+    >();
+    for (let h = 9; h <= 17; h++) {
+      schedule.set(h, { hour: h, zone: 'work', intent: 'library shift' });
+    }
+    const plan = generateDayPlan({
+      persona: skillFor('mei', 'librarian'),
+      zones,
+      day: 0,
+      simTime: 0,
+      hourSchedule: schedule,
+    });
+    const noon = activeBlock(plan, 12);
+    expect(noon?.preferredZone).toBe('work');
+    expect(noon?.intent).toBe('library shift');
+    // Hour 4 falls into a filled (inferred) block — it still resolves cleanly.
+    const dawn = activeBlock(plan, 4);
+    expect(dawn).toBeTruthy();
+    expect(dawn?.id.startsWith('filled-')).toBe(true);
+  });
+
+  it('24-hour sweep: activeBlock returns the authored zone at every integer hour', () => {
+    // Build an archetype-crossing schedule — mornings cafe, midday work,
+    // evening park, rest home — and assert every hour resolves cleanly.
+    const schedule = new Map<
+      number,
+      { hour: number; zone: 'cafe' | 'park' | 'work' | 'home' | null; intent: string }
+    >();
+    for (let h = 0; h < 24; h++) {
+      let zone: 'cafe' | 'park' | 'work' | 'home' = 'home';
+      if (h >= 6 && h <= 8) zone = 'cafe';
+      else if (h >= 9 && h <= 16) zone = 'work';
+      else if (h >= 17 && h <= 19) zone = 'park';
+      schedule.set(h, { hour: h, zone, intent: `${zone} hour ${h}` });
+    }
+    const plan = generateDayPlan({
+      persona: skillFor('mei', 'librarian'),
+      zones,
+      day: 0,
+      simTime: 0,
+      hourSchedule: schedule,
+    });
+    for (let h = 0; h < 24; h++) {
+      const entry = schedule.get(h)!;
+      const block = activeBlock(plan, h);
+      expect(block?.preferredZone).toBe(entry.zone);
+      expect(block?.intent).toBe(entry.intent);
+    }
+  });
+
+  it('authored schedule with null zone yields a preferredZone-less wander block', () => {
+    const schedule = new Map<
+      number,
+      { hour: number; zone: 'cafe' | 'park' | 'work' | 'home' | null; intent: string }
+    >();
+    for (let h = 0; h < 24; h++) {
+      schedule.set(h, {
+        hour: h,
+        zone: h === 13 ? null : 'home',
+        intent: h === 13 ? 'drift' : 'rest',
+      });
+    }
+    const plan = generateDayPlan({
+      persona: skillFor('anon', 'wanderer'),
+      zones,
+      day: 0,
+      simTime: 0,
+      hourSchedule: schedule,
+    });
+    const drift = activeBlock(plan, 13);
+    expect(drift?.preferredZone).toBeNull();
+    expect(drift?.activity).toBe('wander');
   });
 });

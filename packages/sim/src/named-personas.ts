@@ -27,6 +27,24 @@ export interface NamedPersonaSeedMemory {
   related_entities?: string[];
 }
 
+/**
+ * Canonical zone keywords the authored schedule may reference. Must be a
+ * subset of the zones TINA-10 ships in the starter town; `null` means
+ * "unstructured wander, no specific zone".
+ */
+export type ScheduleZone = 'cafe' | 'park' | 'work' | 'home' | null;
+
+const SCHEDULE_ZONES: ReadonlyArray<Exclude<ScheduleZone, null>> = ['cafe', 'park', 'work', 'home'];
+
+export interface ScheduleEntry {
+  /** Sim-hour, integer 0..23. */
+  hour: number;
+  /** One of the canonical zone keywords, or `null` for no target (free wander). */
+  zone: ScheduleZone;
+  /** Short authored intent string surfaced in the admin card and daily notes. */
+  intent: string;
+}
+
 export interface NamedPersonaManifest {
   id: string;
   name: string;
@@ -39,6 +57,13 @@ export interface NamedPersonaManifest {
   seedMemories: NamedPersonaSeedMemory[];
   age?: number;
   occupation?: string;
+  /**
+   * Optional per-sim-hour schedule (TINA-100). When present, the scheduler
+   * soft-nudges the persona's planner toward `zone`/`intent` for the matching
+   * hour. Interrupts (active conversation, whispers, surprise replans) still
+   * win — no hard teleport.
+   */
+  schedule?: ScheduleEntry[];
 }
 
 export interface NamedPersona {
@@ -48,6 +73,11 @@ export interface NamedPersona {
   memoryRoot: string;
   /** Absolute path to the manifest file it was read from. */
   manifestPath: string;
+  /**
+   * Quick-lookup table for the authored schedule, keyed by sim-hour (0..23).
+   * `null` when the manifest did not include a `schedule` field.
+   */
+  scheduleByHour: Map<number, ScheduleEntry> | null;
 }
 
 export interface LoadNamedPersonasOptions {
@@ -77,7 +107,10 @@ export async function loadNamedPersonas(opts: LoadNamedPersonasOptions): Promise
     const manifest = await readManifest(manifestPath);
     const memoryRoot = join(resolve(opts.memoryRootDir), manifest.id, 'memory');
     const skill = manifestToSkill(manifest, manifestPath);
-    out.push({ manifest, skill, memoryRoot, manifestPath });
+    const scheduleByHour = manifest.schedule
+      ? new Map(manifest.schedule.map((e) => [e.hour, e]))
+      : null;
+    out.push({ manifest, skill, memoryRoot, manifestPath, scheduleByHour });
   }
 
   const seenIds = new Set<string>();
@@ -155,6 +188,12 @@ export interface LoadedPersonas {
   dropped: SkillDocument[];
   /** Returns the canonical memory root path for any loaded persona id. */
   memoryRootFor(id: string): string;
+  /**
+   * Returns the authored 24-hour schedule lookup for a persona id, or `null`
+   * when the persona has no schedule (every procedural persona, and named
+   * manifests that omit the `schedule` field).
+   */
+  hourScheduleFor(id: string): Map<number, ScheduleEntry> | null;
 }
 
 /**
@@ -187,7 +226,11 @@ export async function loadAllPersonas(opts: LoadAllPersonasOptions): Promise<Loa
   }
 
   const namedMemoryById = new Map<string, string>();
-  for (const p of named) namedMemoryById.set(p.manifest.id, p.memoryRoot);
+  const namedScheduleById = new Map<string, Map<number, ScheduleEntry>>();
+  for (const p of named) {
+    namedMemoryById.set(p.manifest.id, p.memoryRoot);
+    if (p.scheduleByHour) namedScheduleById.set(p.manifest.id, p.scheduleByHour);
+  }
 
   return {
     skills: merged,
@@ -199,6 +242,9 @@ export async function loadAllPersonas(opts: LoadAllPersonasOptions): Promise<Loa
       const skill = merged.find((s) => s.id === id);
       if (skill) return join(skillDirectory(skill), 'memory');
       return join(memoryRootDir, id, 'memory');
+    },
+    hourScheduleFor(id: string): Map<number, ScheduleEntry> | null {
+      return namedScheduleById.get(id) ?? null;
     },
   };
 }
@@ -228,6 +274,7 @@ function validateManifest(raw: unknown, path: string): NamedPersonaManifest {
   const traits = requireStringArray(r.traits, 'traits', path);
   const routines = requireStringArray(r.routines, 'routines', path);
   const seedMemories = validateSeedMemories(r.seedMemories, path);
+  const schedule = validateSchedule(r.schedule, path);
   return {
     id,
     name,
@@ -240,7 +287,57 @@ function validateManifest(raw: unknown, path: string): NamedPersonaManifest {
     seedMemories,
     age: typeof r.age === 'number' ? r.age : undefined,
     occupation: typeof r.occupation === 'string' ? r.occupation : undefined,
+    schedule,
   };
+}
+
+function validateSchedule(raw: unknown, path: string): ScheduleEntry[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new Error(`named persona manifest ${path} schedule must be a list of hour entries`);
+  }
+  const seen = new Set<number>();
+  const out: ScheduleEntry[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const entry = raw[i];
+    if (!entry || typeof entry !== 'object') {
+      throw new Error(`named persona manifest ${path} schedule[${i}] must be a mapping`);
+    }
+    const e = entry as Record<string, unknown>;
+    const hour = e.hour;
+    if (typeof hour !== 'number' || !Number.isInteger(hour) || hour < 0 || hour > 23) {
+      throw new Error(
+        `named persona manifest ${path} schedule[${i}].hour must be an integer 0..23 (got ${JSON.stringify(hour)})`,
+      );
+    }
+    if (seen.has(hour)) {
+      throw new Error(`named persona manifest ${path} schedule has duplicate hour ${hour}`);
+    }
+    seen.add(hour);
+    const zoneRaw = e.zone;
+    let zone: ScheduleZone;
+    if (zoneRaw === null || zoneRaw === undefined) {
+      zone = null;
+    } else if (
+      typeof zoneRaw === 'string' &&
+      (SCHEDULE_ZONES as ReadonlyArray<string>).includes(zoneRaw)
+    ) {
+      zone = zoneRaw as ScheduleZone;
+    } else {
+      throw new Error(
+        `named persona manifest ${path} schedule[${i}].zone must be one of ${SCHEDULE_ZONES.join(',')} or null (got ${JSON.stringify(zoneRaw)})`,
+      );
+    }
+    const intent = e.intent;
+    if (typeof intent !== 'string' || intent.length === 0) {
+      throw new Error(
+        `named persona manifest ${path} schedule[${i}].intent must be a non-empty string`,
+      );
+    }
+    out.push({ hour, zone, intent });
+  }
+  out.sort((a, b) => a.hour - b.hour);
+  return out;
 }
 
 function validateGlyph(raw: unknown, path: string): NamedPersonaGlyph {

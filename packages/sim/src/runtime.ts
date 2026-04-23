@@ -21,6 +21,7 @@ import {
 import type { HeartbeatPolicy } from './heartbeat.js';
 import { DefaultHeartbeatPolicy, makeRngForAgent } from './heartbeat.js';
 import type { MemoryFact, ParaMemory } from './memory.js';
+import type { ScheduleEntry } from './named-personas.js';
 import { findPath } from './path.js';
 import {
   type HeardSpeech,
@@ -40,6 +41,12 @@ export interface RuntimeAgent {
   skill: SkillDocument;
   memory: ParaMemory;
   initial?: Partial<AgentState>;
+  /**
+   * Authored per-sim-hour schedule for this agent (TINA-100). Only set for
+   * named personas whose manifest defines a `schedule` block. Procedural
+   * personas omit it and fall back to archetype inference.
+   */
+  hourSchedule?: Map<number, ScheduleEntry> | null;
 }
 
 export interface RuntimeOptions {
@@ -222,6 +229,7 @@ export class Runtime {
   private readonly agents: Agent[] = [];
   private readonly memories = new Map<string, ParaMemory>();
   private readonly skills = new Map<string, SkillDocument>();
+  private readonly hourSchedules = new Map<string, Map<number, ScheduleEntry>>();
   private readonly recent: Recent = { speech: [] };
   private readonly pendingWhispers: PendingWhisper[] = [];
   private readonly pendingObservations: PendingObservation[] = [];
@@ -313,6 +321,9 @@ export class Runtime {
     this.agents.push(agent);
     this.memories.set(agent.def.id, entry.memory);
     this.skills.set(agent.def.id, entry.skill);
+    if (entry.hourSchedule && entry.hourSchedule.size > 0) {
+      this.hourSchedules.set(agent.def.id, entry.hourSchedule);
+    }
     if (this.reflectionsEnabled) {
       this.reflectionEngines.set(
         agent.def.id,
@@ -386,6 +397,7 @@ export class Runtime {
         zones: this.world.zones,
         memory,
         simTime,
+        hourSchedule: this.hourSchedules.get(agent.def.id) ?? null,
       });
 
       if (committed) {

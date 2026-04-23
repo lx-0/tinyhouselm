@@ -30,3 +30,28 @@ seedMemories:
   - fact: "Small kindnesses matter. Everyone deserves a polite reply, even on a hard day."
     category: preference
     importance: 5
+schedule:
+  - { hour: 0,  zone: home, intent: "asleep at home" }
+  - { hour: 1,  zone: home, intent: "asleep at home" }
+  - { hour: 2,  zone: home, intent: "asleep at home" }
+  - { hour: 3,  zone: home, intent: "asleep at home" }
+  - { hour: 4,  zone: home, intent: "asleep at home" }
+  - { hour: 5,  zone: home, intent: "asleep at home" }
+  - { hour: 6,  zone: home, intent: "quiet coffee + one chapter before the commute" }
+  - { hour: 7,  zone: home, intent: "slow morning — shower, dress, pack the tote" }
+  - { hour: 8,  zone: cafe, intent: "coffee at the cafe before the library opens" }
+  - { hour: 9,  zone: work, intent: "open the branch, re-shelve the overnight returns" }
+  - { hour: 10, zone: work, intent: "reference desk hours" }
+  - { hour: 11, zone: work, intent: "reference desk hours" }
+  - { hour: 12, zone: park, intent: "lunch at the park bench" }
+  - { hour: 13, zone: work, intent: "afternoon shelving and requests" }
+  - { hour: 14, zone: work, intent: "afternoon shelving and requests" }
+  - { hour: 15, zone: work, intent: "afternoon shelving and requests" }
+  - { hour: 16, zone: work, intent: "reader recommendations with the regulars" }
+  - { hour: 17, zone: work, intent: "closing-hour shift at the library" }
+  - { hour: 18, zone: work, intent: "closing-hour shift at the library" }
+  - { hour: 19, zone: park, intent: "evening walk in the park after dinner" }
+  - { hour: 20, zone: home, intent: "dinner and the kids' homework at home" }
+  - { hour: 21, zone: home, intent: "reading at home" }
+  - { hour: 22, zone: home, intent: "winding down for bed" }
+  - { hour: 23, zone: home, intent: "asleep at home" }

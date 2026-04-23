@@ -508,6 +508,67 @@ describe('Runtime', () => {
     );
   });
 
+  it('agentContext surfaces the authored hour-schedule intent for named personas (TINA-100)', async () => {
+    // Build a runtime with one authored persona whose schedule pins them in
+    // the `work` zone from 09 to 17. We tick once at sim-time 10:00 — the
+    // plan that commits should be block-sourced from the authored schedule.
+    const events: RuntimeEvent[] = [];
+    const root = await mkdtemp(join(tmpdir(), 'tina-mem-authored-'));
+    const hourSchedule = new Map<
+      number,
+      { hour: number; zone: 'cafe' | 'park' | 'work' | 'home' | null; intent: string }
+    >();
+    for (let h = 0; h < 24; h++) {
+      if (h >= 9 && h <= 17)
+        hourSchedule.set(h, { hour: h, zone: 'work', intent: 'library shift — reference desk' });
+      else if (h === 19)
+        hourSchedule.set(h, { hour: h, zone: 'park', intent: 'evening walk in the park' });
+      else hourSchedule.set(h, { hour: h, zone: 'home', intent: 'at home' });
+    }
+    const clock = new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 });
+    // startSimTime is unset; clock begins at 0. Seek by running to ~10:00.
+    const world = new World({
+      width: 32,
+      height: 24,
+      clock,
+      zones: [
+        { name: 'cafe', x: 0, y: 0, width: 6, height: 6 },
+        { name: 'park', x: 10, y: 0, width: 6, height: 6 },
+        { name: 'home', x: 0, y: 10, width: 6, height: 6 },
+        { name: 'work', x: 10, y: 10, width: 6, height: 6 },
+      ],
+    });
+    const runtime = new Runtime({
+      agents: [
+        {
+          skill: skillFor({ name: 'mei', description: 'librarian' }),
+          memory: new ParaMemory({
+            root,
+            now: () => new Date('2026-04-23T00:00:00Z'),
+          }),
+          initial: { position: { x: 2, y: 2 } },
+          hourSchedule,
+        },
+      ],
+      world,
+      policy: silentPolicy,
+      seed: 100,
+      tickMs: 100,
+      onEvent: (e) => events.push(e),
+    });
+    // Advance sim-time to ~10:00 by bumping the clock manually, then tick.
+    // The clock's underlying `stepped` mode advances simTime by tickMs *
+    // speed per `tick` — we abuse that by running tickless: just observe
+    // the committed plan via ensurePlan semantics exercised in tickOnce.
+    clock.restore({ simTime: 10 * 3600, ticks: clock.ticks, speed: clock.speed });
+    await runtime.runTicks(1);
+    const ctx = runtime.agentContext('mei');
+    expect(ctx.plan).not.toBeNull();
+    expect(ctx.plan!.blockIntent).toBe('library shift — reference desk');
+    expect(ctx.plan!.preferredZone).toBe('work');
+    expect(ctx.plan!.blockId.startsWith('authored-')).toBe(true);
+  });
+
   it('setOnEvent replaces the observer callback post-construction', async () => {
     const { runtime } = await makeRuntime(19);
     const after: string[] = [];

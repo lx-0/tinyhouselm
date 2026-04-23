@@ -1,6 +1,7 @@
 import type { SimTime, Zone } from '@tina/shared';
 import { inferPersonaHints } from './heartbeat.js';
 import type { MemoryFact, ParaMemory } from './memory.js';
+import type { ScheduleEntry, ScheduleZone } from './named-personas.js';
 import type { SkillDocument } from './skills.js';
 
 export type PlanActivity = 'work' | 'socialize' | 'rest' | 'wander' | 'eat';
@@ -197,6 +198,102 @@ export interface GeneratePlanInput {
    * away from anything flagged as an avoidance pattern in the text.
    */
   reflections?: MemoryFact[];
+  /**
+   * Optional authored per-sim-hour schedule (TINA-100). When present, plan
+   * blocks are derived from the authored table instead of the archetype
+   * inference. Missing hours fall back to the inferred archetype block.
+   */
+  hourSchedule?: Map<number, ScheduleEntry> | null;
+}
+
+/**
+ * Map a canonical schedule-zone keyword onto a PlanActivity. Keeps the
+ * authoring surface tiny (just `zone` + `intent`) while still driving the
+ * existing heartbeat policy's in-zone behavior branching.
+ */
+function activityForScheduleZone(zone: ScheduleZone): PlanActivity {
+  switch (zone) {
+    case 'work':
+      return 'work';
+    case 'cafe':
+      return 'socialize';
+    case 'park':
+      return 'wander';
+    case 'home':
+      return 'rest';
+    default:
+      return 'wander';
+  }
+}
+
+interface HourSlot {
+  zone: string | null;
+  zoneKeyword: ScheduleZone;
+  intent: string;
+  activity: PlanActivity;
+  authored: boolean;
+}
+
+/**
+ * Build PlanBlocks directly from the authored per-sim-hour schedule. Hours
+ * with no authored entry borrow from the inferred archetype's active block
+ * so the day still flows when a manifest authors only a partial schedule.
+ * Adjacent hours that share zone + intent + activity collapse into a single
+ * block so `activeBlock` stays cheap.
+ */
+function buildAuthoredBlocks(
+  schedule: Map<number, ScheduleEntry>,
+  zones: Zone[],
+  fallback: DayPlan,
+): PlanBlock[] {
+  const slots: HourSlot[] = [];
+  for (let h = 0; h < 24; h++) {
+    const entry = schedule.get(h);
+    if (entry) {
+      slots.push({
+        zone: entry.zone ? (findZone(zones, entry.zone) ?? null) : null,
+        zoneKeyword: entry.zone,
+        intent: entry.intent,
+        activity: activityForScheduleZone(entry.zone),
+        authored: true,
+      });
+      continue;
+    }
+    const block = activeBlock(fallback, h);
+    slots.push({
+      zone: block?.preferredZone ?? null,
+      zoneKeyword: null,
+      intent: block?.intent ?? 'drift through the hour',
+      activity: block?.activity ?? 'wander',
+      authored: false,
+    });
+  }
+
+  const blocks: PlanBlock[] = [];
+  let start = 0;
+  while (start < 24) {
+    let end = start + 1;
+    const head = slots[start]!;
+    while (
+      end < 24 &&
+      slots[end]!.zone === head.zone &&
+      slots[end]!.intent === head.intent &&
+      slots[end]!.activity === head.activity &&
+      slots[end]!.authored === head.authored
+    ) {
+      end++;
+    }
+    blocks.push({
+      id: `${head.authored ? 'authored' : 'filled'}-${start.toString().padStart(2, '0')}-${end.toString().padStart(2, '0')}`,
+      startHour: start,
+      endHour: end === 24 ? 30 : end, // extend the tail so late-night hours still resolve
+      intent: head.intent,
+      preferredZone: head.zone,
+      activity: head.activity,
+    });
+    start = end;
+  }
+  return blocks;
 }
 
 export function generateDayPlan(input: GeneratePlanInput): DayPlan {
@@ -285,7 +382,7 @@ export function generateDayPlan(input: GeneratePlanInput): DayPlan {
   const legacyEveningStart = 18;
   const legacyNightStart = 22;
 
-  const blocks: PlanBlock[] = [
+  const inferredBlocks: PlanBlock[] = [
     {
       id: 'morning',
       startHour: useLegacyBoundaries ? legacyMorningStart : morningStart,
@@ -327,6 +424,23 @@ export function generateDayPlan(input: GeneratePlanInput): DayPlan {
       activity: 'rest',
     },
   ];
+
+  const inferredFallback: DayPlan = {
+    day,
+    generatedAt: simTime,
+    persona: persona.id,
+    personaName: persona.displayName || persona.id,
+    summary: '',
+    blocks: inferredBlocks,
+    hourPlans: {},
+    replanLog: [],
+    carriedReflections: [],
+    avoidances: [],
+  };
+  const blocks: PlanBlock[] =
+    input.hourSchedule && input.hourSchedule.size > 0
+      ? buildAuthoredBlocks(input.hourSchedule, zones, inferredFallback)
+      : inferredBlocks;
 
   const label = persona.displayName || persona.id;
   const dayLabel = isWeekend
@@ -482,6 +596,12 @@ export class PlanRuntime {
     simTime: SimTime;
     /** Max reflection facts to thread into plan context. Default 3. */
     reflectionLimit?: number;
+    /**
+     * Authored per-sim-hour schedule. Named personas pass their lookup here
+     * so the plan's blocks are derived from the authored table instead of
+     * the inferred archetype. Optional / null = archetype inference.
+     */
+    hourSchedule?: Map<number, ScheduleEntry> | null;
   }): Promise<{ plan: DayPlan; committed: boolean }> {
     const { agentId, persona, zones, memory, simTime } = args;
     const day = simDay(simTime);
@@ -500,7 +620,14 @@ export class PlanRuntime {
     if (plan && plan.day === day) return { plan, committed: false };
 
     const reflections = await memory.recentReflections(args.reflectionLimit ?? 3);
-    plan = generateDayPlan({ persona, zones, day, simTime, reflections });
+    plan = generateDayPlan({
+      persona,
+      zones,
+      day,
+      simTime,
+      reflections,
+      hourSchedule: args.hourSchedule ?? null,
+    });
     this.plans.set(agentId, plan);
     await memory.writePlanRaw(day, plan);
     return { plan, committed: true };

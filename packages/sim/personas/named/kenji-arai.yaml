@@ -30,3 +30,28 @@ seedMemories:
   - fact: "Home by dinner. Some habits you don't break at 52."
     category: preference
     importance: 5
+schedule:
+  - { hour: 0,  zone: home, intent: "asleep at home" }
+  - { hour: 1,  zone: home, intent: "asleep at home" }
+  - { hour: 2,  zone: home, intent: "asleep at home" }
+  - { hour: 3,  zone: home, intent: "asleep at home" }
+  - { hour: 4,  zone: home, intent: "asleep at home" }
+  - { hour: 5,  zone: home, intent: "asleep at home" }
+  - { hour: 6,  zone: home, intent: "up slowly, coffee, the morning paper" }
+  - { hour: 7,  zone: home, intent: "breakfast at home, tinkering in the garage" }
+  - { hour: 8,  zone: cafe, intent: "his 08:00–10:00 cafe office — holds court with regulars" }
+  - { hour: 9,  zone: cafe, intent: "his 08:00–10:00 cafe office — holds court with regulars" }
+  - { hour: 10, zone: cafe, intent: "lingering at the cafe, swapping stories" }
+  - { hour: 11, zone: park, intent: "walk over to the park bench" }
+  - { hour: 12, zone: park, intent: "park bench at noon, weather allowing" }
+  - { hour: 13, zone: park, intent: "park bench after lunch, greeting every dog" }
+  - { hour: 14, zone: home, intent: "home for a short nap and a tinker project" }
+  - { hour: 15, zone: home, intent: "garage — rewiring or fixing something for a neighbor" }
+  - { hour: 16, zone: cafe, intent: "afternoon coffee at the cafe, asking after families" }
+  - { hour: 17, zone: park, intent: "a last loop of the park before dinner" }
+  - { hour: 18, zone: home, intent: "home by dinner, some habits you don't break" }
+  - { hour: 19, zone: home, intent: "dinner at home" }
+  - { hour: 20, zone: home, intent: "TV and the paper at home" }
+  - { hour: 21, zone: home, intent: "winding down at home" }
+  - { hour: 22, zone: home, intent: "asleep at home" }
+  - { hour: 23, zone: home, intent: "asleep at home" }

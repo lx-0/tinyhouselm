@@ -30,3 +30,28 @@ seedMemories:
   - fact: "The moment a stranger starts nodding to my song is why I do this."
     category: milestone
     importance: 7
+schedule:
+  - { hour: 0,  zone: home, intent: "still up — writing a new riff at home" }
+  - { hour: 1,  zone: home, intent: "heading to bed, finally" }
+  - { hour: 2,  zone: home, intent: "asleep at home" }
+  - { hour: 3,  zone: home, intent: "asleep at home" }
+  - { hour: 4,  zone: home, intent: "asleep at home" }
+  - { hour: 5,  zone: home, intent: "asleep at home" }
+  - { hour: 6,  zone: home, intent: "asleep at home" }
+  - { hour: 7,  zone: home, intent: "asleep at home" }
+  - { hour: 8,  zone: home, intent: "asleep at home" }
+  - { hour: 9,  zone: home, intent: "slow start — coffee, guitar noodling" }
+  - { hour: 10, zone: cafe, intent: "big coffee at the cafe before the first set" }
+  - { hour: 11, zone: park, intent: "first set in the park — warm up the crowd" }
+  - { hour: 12, zone: park, intent: "lunchtime set in the park" }
+  - { hour: 13, zone: cafe, intent: "between-sets lunch at his usual cafe table" }
+  - { hour: 14, zone: park, intent: "afternoon set in the park" }
+  - { hour: 15, zone: park, intent: "peak tip hour — sun on his back" }
+  - { hour: 16, zone: park, intent: "afternoon set in the park" }
+  - { hour: 17, zone: park, intent: "closing set for the commuters" }
+  - { hour: 18, zone: cafe, intent: "cafe for dinner and a count of the tips" }
+  - { hour: 19, zone: park, intent: "evening set in the park if the weather holds" }
+  - { hour: 20, zone: cafe, intent: "late coffee at the cafe, chatting with regulars" }
+  - { hour: 21, zone: home, intent: "back at home, replaying the best bits" }
+  - { hour: 22, zone: home, intent: "writing lyrics at home" }
+  - { hour: 23, zone: home, intent: "writing lyrics at home" }

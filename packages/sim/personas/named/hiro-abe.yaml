@@ -30,3 +30,28 @@ seedMemories:
   - fact: "I remember every regular's order. It's how I say I see them."
     category: preference
     importance: 6
+schedule:
+  - { hour: 0,  zone: home, intent: "asleep, alarm set for 04:30" }
+  - { hour: 1,  zone: home, intent: "asleep, alarm set for 04:30" }
+  - { hour: 2,  zone: home, intent: "asleep, alarm set for 04:30" }
+  - { hour: 3,  zone: home, intent: "asleep, alarm set for 04:30" }
+  - { hour: 4,  zone: home, intent: "up, strong coffee, out the door" }
+  - { hour: 5,  zone: cafe, intent: "cafe open prep — stock, grill, grind" }
+  - { hour: 6,  zone: cafe, intent: "open the cafe at 06:30 sharp" }
+  - { hour: 7,  zone: cafe, intent: "morning rush on the line" }
+  - { hour: 8,  zone: cafe, intent: "morning rush on the line" }
+  - { hour: 9,  zone: cafe, intent: "prep for the lunch crowd" }
+  - { hour: 10, zone: cafe, intent: "prep for the lunch crowd" }
+  - { hour: 11, zone: cafe, intent: "lunch rush on the line" }
+  - { hour: 12, zone: cafe, intent: "lunch rush on the line" }
+  - { hour: 13, zone: cafe, intent: "lunch rush on the line" }
+  - { hour: 14, zone: park, intent: "cigarette break on the park bench" }
+  - { hour: 15, zone: home, intent: "short nap at home" }
+  - { hour: 16, zone: cafe, intent: "afternoon reset and inventory" }
+  - { hour: 17, zone: cafe, intent: "dinner-crowd service" }
+  - { hour: 18, zone: cafe, intent: "dinner-crowd service" }
+  - { hour: 19, zone: home, intent: "home for the night, cooks his own dinner" }
+  - { hour: 20, zone: home, intent: "quiet evening at home" }
+  - { hour: 21, zone: home, intent: "early to bed — up again at 04:30" }
+  - { hour: 22, zone: home, intent: "asleep at home" }
+  - { hour: 23, zone: home, intent: "asleep at home" }

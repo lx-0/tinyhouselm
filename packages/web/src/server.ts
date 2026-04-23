@@ -153,11 +153,13 @@ async function main(): Promise<void> {
 
   const agentsDir = resolve(REPO_ROOT, 'world', 'agents');
   const namedDir = resolve(REPO_ROOT, 'packages', 'sim', 'personas', 'named');
-  const { skills, named, memoryRootFor } = await timedBootStep('load_personas', () =>
-    loadAllPersonas({
-      namedManifestDir: namedDir,
-      proceduralDir: agentsDir,
-    }),
+  const { skills, named, memoryRootFor, hourScheduleFor } = await timedBootStep(
+    'load_personas',
+    () =>
+      loadAllPersonas({
+        namedManifestDir: namedDir,
+        proceduralDir: agentsDir,
+      }),
   );
   if (skills.length === 0) {
     throw new Error(`no personas found under ${agentsDir} (named dir: ${namedDir})`);
@@ -195,6 +197,7 @@ async function main(): Promise<void> {
         flushMode: 'deferred',
       }),
       initial: { position: { ...safe } },
+      hourSchedule: hourScheduleFor(skill.id),
     };
   });
 

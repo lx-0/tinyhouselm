@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import type { TileMap, Vec2 } from '@tina/shared';
 import { SimulationClock } from './clock.js';
 import { ParaMemory } from './memory.js';
-import { loadAllPersonas, seedNamedPersonaMemories } from './named-personas.js';
+import { type ScheduleEntry, loadAllPersonas, seedNamedPersonaMemories } from './named-personas.js';
 import { describeAction } from './perception.js';
 import { seededRng } from './rng.js';
 import { Runtime, type RuntimeEvent } from './runtime.js';
@@ -122,6 +122,7 @@ const NAMED_PERSONAS_DIR = resolve(REPO_ROOT, 'packages', 'sim', 'personas', 'na
 async function loadSkills(opts: CliOptions): Promise<{
   skills: SkillDocument[];
   memoryRootFor: (id: string) => string;
+  hourScheduleFor: (id: string) => Map<number, ScheduleEntry> | null;
 }> {
   if (opts.skillPaths.length > 0) {
     // Explicit --skill paths bypass the named+procedural merge; they're
@@ -135,6 +136,7 @@ async function loadSkills(opts: CliOptions): Promise<{
         const s = filtered.find((x) => x.id === id);
         return s ? `${skillDirectory(s)}/memory` : resolve(opts.agentsDir, id, 'memory');
       },
+      hourScheduleFor: () => null,
     };
   }
   const loaded = await loadAllPersonas({
@@ -152,9 +154,17 @@ async function loadSkills(opts: CliOptions): Promise<{
         filtered.unshift(np.skill);
       }
     }
-    return { skills: filtered, memoryRootFor: loaded.memoryRootFor };
+    return {
+      skills: filtered,
+      memoryRootFor: loaded.memoryRootFor,
+      hourScheduleFor: loaded.hourScheduleFor,
+    };
   }
-  return { skills: loaded.skills, memoryRootFor: loaded.memoryRootFor };
+  return {
+    skills: loaded.skills,
+    memoryRootFor: loaded.memoryRootFor,
+    hourScheduleFor: loaded.hourScheduleFor,
+  };
 }
 
 function spawnAnchorsFromMap(map: TileMap): Vec2[] {
@@ -209,7 +219,7 @@ function formatEvent(event: RuntimeEvent): string {
 
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
-  const { skills, memoryRootFor } = await loadSkills(opts);
+  const { skills, memoryRootFor, hourScheduleFor } = await loadSkills(opts);
   if (skills.length === 0) {
     console.error(
       `no personas found. Checked ${resolve(opts.agentsDir)}${
@@ -253,6 +263,7 @@ async function main(): Promise<void> {
       initial: {
         position: { ...safe },
       },
+      hourSchedule: hourScheduleFor(skill.id),
     };
   });
 

@@ -42,7 +42,8 @@ async function makeWorkspace(): Promise<Workspace> {
   return ws;
 }
 
-function manifestYaml(partial: Partial<NamedPersonaManifest>): string {
+function manifestYaml(partial: Partial<NamedPersonaManifest> & { scheduleRaw?: string }): string {
+  const { scheduleRaw, ...rest } = partial;
   const full: NamedPersonaManifest = {
     id: 'mei-tanaka',
     name: 'Mei Tanaka',
@@ -53,7 +54,7 @@ function manifestYaml(partial: Partial<NamedPersonaManifest>): string {
     routines: ['library 09:00–19:00'],
     voice: 'measured',
     seedMemories: [{ fact: 'coffee before work', category: 'preference', importance: 5 }],
-    ...partial,
+    ...rest,
   };
   const lines: string[] = [];
   lines.push(`id: ${full.id}`);
@@ -79,6 +80,15 @@ function manifestYaml(partial: Partial<NamedPersonaManifest>): string {
       lines.push(
         `    related_entities: [${s.related_entities.map((x) => JSON.stringify(x)).join(', ')}]`,
       );
+    }
+  }
+  if (scheduleRaw !== undefined) {
+    lines.push(scheduleRaw);
+  } else if (full.schedule) {
+    lines.push('schedule:');
+    for (const e of full.schedule) {
+      const zoneStr = e.zone === null ? 'null' : e.zone;
+      lines.push(`  - { hour: ${e.hour}, zone: ${zoneStr}, intent: ${JSON.stringify(e.intent)} }`);
     }
   }
   lines.push('');
@@ -166,6 +176,97 @@ describe('loadNamedPersonas', () => {
     await expect(
       loadNamedPersonas({ manifestDir: ws.manifestDir, memoryRootDir: ws.proceduralDir }),
     ).rejects.toThrow(/invalid id/);
+  });
+
+  it('accepts a full 24-hour schedule and exposes scheduleByHour', async () => {
+    const ws = await makeWorkspace();
+    await writeFile(
+      join(ws.manifestDir, 'mei.yaml'),
+      manifestYaml({
+        schedule: Array.from({ length: 24 }, (_, h) => ({
+          hour: h,
+          zone: h >= 9 && h <= 17 ? ('work' as const) : ('home' as const),
+          intent: h >= 9 && h <= 17 ? 'at the library' : 'at home',
+        })),
+      }),
+    );
+    const loaded = await loadNamedPersonas({
+      manifestDir: ws.manifestDir,
+      memoryRootDir: ws.proceduralDir,
+    });
+    expect(loaded).toHaveLength(1);
+    const mei = loaded[0]!;
+    expect(mei.scheduleByHour).not.toBeNull();
+    expect(mei.scheduleByHour!.size).toBe(24);
+    expect(mei.scheduleByHour!.get(9)?.zone).toBe('work');
+    expect(mei.scheduleByHour!.get(9)?.intent).toBe('at the library');
+    expect(mei.scheduleByHour!.get(22)?.zone).toBe('home');
+  });
+
+  it('omits scheduleByHour when the manifest has no schedule', async () => {
+    const ws = await makeWorkspace();
+    await writeFile(join(ws.manifestDir, 'mei.yaml'), manifestYaml({}));
+    const loaded = await loadNamedPersonas({
+      manifestDir: ws.manifestDir,
+      memoryRootDir: ws.proceduralDir,
+    });
+    expect(loaded[0]!.scheduleByHour).toBeNull();
+  });
+
+  it('rejects schedule with unknown zone', async () => {
+    const ws = await makeWorkspace();
+    await writeFile(
+      join(ws.manifestDir, 'bad.yaml'),
+      manifestYaml({
+        scheduleRaw: 'schedule:\n  - { hour: 9, zone: library, intent: "work" }',
+      }),
+    );
+    await expect(
+      loadNamedPersonas({ manifestDir: ws.manifestDir, memoryRootDir: ws.proceduralDir }),
+    ).rejects.toThrow(/zone must be one of/);
+  });
+
+  it('rejects schedule with duplicate hour', async () => {
+    const ws = await makeWorkspace();
+    await writeFile(
+      join(ws.manifestDir, 'bad.yaml'),
+      manifestYaml({
+        scheduleRaw: [
+          'schedule:',
+          '  - { hour: 9, zone: work, intent: "a" }',
+          '  - { hour: 9, zone: home, intent: "b" }',
+        ].join('\n'),
+      }),
+    );
+    await expect(
+      loadNamedPersonas({ manifestDir: ws.manifestDir, memoryRootDir: ws.proceduralDir }),
+    ).rejects.toThrow(/duplicate hour 9/);
+  });
+
+  it('rejects schedule with out-of-range hour', async () => {
+    const ws = await makeWorkspace();
+    await writeFile(
+      join(ws.manifestDir, 'bad.yaml'),
+      manifestYaml({
+        scheduleRaw: 'schedule:\n  - { hour: 30, zone: home, intent: "nope" }',
+      }),
+    );
+    await expect(
+      loadNamedPersonas({ manifestDir: ws.manifestDir, memoryRootDir: ws.proceduralDir }),
+    ).rejects.toThrow(/hour must be an integer 0\.\.23/);
+  });
+
+  it('rejects schedule entry without intent', async () => {
+    const ws = await makeWorkspace();
+    await writeFile(
+      join(ws.manifestDir, 'bad.yaml'),
+      manifestYaml({
+        scheduleRaw: 'schedule:\n  - { hour: 9, zone: work, intent: "" }',
+      }),
+    );
+    await expect(
+      loadNamedPersonas({ manifestDir: ws.manifestDir, memoryRootDir: ws.proceduralDir }),
+    ).rejects.toThrow(/intent must be a non-empty string/);
   });
 
   it('rejects duplicate ids across manifests', async () => {
@@ -314,6 +415,38 @@ describe('loadAllPersonas', () => {
     expect(mei.bio).toBe('librarian');
     expect(proc.named).toBeUndefined();
     expect(proc.color).toBeUndefined();
+  });
+
+  it('hourScheduleFor returns the authored schedule for named personas, null otherwise', async () => {
+    const ws = await makeWorkspace();
+    await writeFile(
+      join(ws.manifestDir, 'mei.yaml'),
+      manifestYaml({
+        id: 'mei-tanaka',
+        schedule: [
+          { hour: 9, zone: 'work', intent: 'open the library' },
+          { hour: 20, zone: 'home', intent: 'reading at home' },
+        ],
+      }),
+    );
+    await writeFile(
+      join(ws.manifestDir, 'hiro.yaml'),
+      manifestYaml({ id: 'hiro-abe', name: 'Hiro Abe' }),
+    );
+    await writeProcedural(ws.proceduralDir, 'p-001-wren');
+
+    const loaded = await loadAllPersonas({
+      namedManifestDir: ws.manifestDir,
+      proceduralDir: ws.proceduralDir,
+    });
+    const meiSchedule = loaded.hourScheduleFor('mei-tanaka');
+    expect(meiSchedule).not.toBeNull();
+    expect(meiSchedule!.get(9)?.intent).toBe('open the library');
+    expect(meiSchedule!.get(20)?.zone).toBe('home');
+    // Hiro manifest omits schedule → null lookup.
+    expect(loaded.hourScheduleFor('hiro-abe')).toBeNull();
+    // Procedural personas never have a schedule.
+    expect(loaded.hourScheduleFor('p-001-wren')).toBeNull();
   });
 
   it('named personas are never dropped when cap is smaller than named.length', async () => {
