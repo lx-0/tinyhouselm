@@ -71,6 +71,14 @@ export type AgentSnap = {
   gotoTarget?: Vec2 | null;
   mood?: AgentMood;
   plan?: PlanContext | null;
+  /** True for hand-authored named characters (TINA-27). Omitted for procedural fills. */
+  named?: boolean;
+  /** Optional hex body color for named personas so the renderer can distinguish them. */
+  color?: string | null;
+  /** Optional hex accent used for the named-persona halo / ring. */
+  accent?: string | null;
+  /** One-line author-supplied bio surfaced in /admin. Undefined for procedural personas. */
+  bio?: string | null;
 };
 
 export type Zone = { name: string; x: number; y: number; width: number; height: number };

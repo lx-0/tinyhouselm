@@ -6,6 +6,14 @@ export interface AgentDefinition {
   description: string;
   body: string;
   metadata: Record<string, string>;
+  /** Hand-authored named character flag (TINA-27). */
+  named?: boolean;
+  /** Hex body color for the renderer when this agent is named. */
+  color?: string | null;
+  /** Hex accent for the named-persona halo / ring. */
+  accent?: string | null;
+  /** One-line bio shown in /admin for named personas. */
+  bio?: string | null;
 }
 
 export interface AgentState {
@@ -41,7 +49,7 @@ export class Agent {
   }
 
   snapshot(): AgentSnap {
-    return {
+    const snap: AgentSnap = {
       id: this.def.id,
       name: this.def.name,
       position: { ...this.state.position },
@@ -50,6 +58,11 @@ export class Agent {
       zone: this.state.zone,
       gotoTarget: this.state.gotoTarget ? { ...this.state.gotoTarget } : null,
     };
+    if (this.def.named) snap.named = true;
+    if (this.def.color) snap.color = this.def.color;
+    if (this.def.accent) snap.accent = this.def.accent;
+    if (this.def.bio) snap.bio = this.def.bio;
+    return snap;
   }
 
   apply(action: AgentAction): void {
