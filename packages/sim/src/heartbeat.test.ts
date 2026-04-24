@@ -14,7 +14,7 @@ function mkPerception(overrides: Partial<Perception>): Perception {
     name: 'self',
     position: { x: 0, y: 0 },
     zone: null,
-    facing: 'south',
+    facing: 'S',
     currentAction: 'idle',
     gotoTarget: null,
   };
