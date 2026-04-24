@@ -4,6 +4,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type Delta, type Vec2, deriveWorldClock } from '@tina/shared';
 import {
+  type NudgeDirection,
   ParaMemory,
   RelationshipStore,
   Runtime,
@@ -424,6 +425,24 @@ async function main(): Promise<void> {
     return id;
   };
 
+  // Per-session nudge tracker (TINA-275). Populated when a queued viewer
+  // nudge is consumed by a close; read at `/moment/:id` render time to
+  // surface the "viewer-nudged" pill. Bounded by MAX — oldest entries evict
+  // on insert so we can't leak under sustained traffic. Not persisted:
+  // restart clears the pills, which is fine since moment records are
+  // short-retention already.
+  const NUDGED_SESSIONS_MAX = 512;
+  const nudgedSessions = new Map<string, NudgeDirection>();
+  const rememberNudgedSession = (sessionId: string, direction: NudgeDirection): void => {
+    if (nudgedSessions.size >= NUDGED_SESSIONS_MAX) {
+      const oldest = nudgedSessions.keys().next();
+      if (!oldest.done) nudgedSessions.delete(oldest.value);
+    }
+    nudgedSessions.set(sessionId, direction);
+  };
+  const isSessionNudged = (sessionId: string): NudgeDirection | null =>
+    nudgedSessions.get(sessionId) ?? null;
+
   runtime.setOnEvent((event: RuntimeEvent) => {
     switch (event.kind) {
       case 'plan_committed': {
@@ -508,6 +527,17 @@ async function main(): Promise<void> {
         });
         return;
       }
+      case 'relationship_nudge_applied': {
+        rememberNudgedSession(event.sessionId, event.direction);
+        stickyMetrics?.recordNudge();
+        log.info('admin.nudge.applied', {
+          sessionId: event.sessionId,
+          a: event.a,
+          b: event.b,
+          direction: event.direction,
+        });
+        return;
+      }
       case 'conversation_close': {
         const participants = [...event.participants];
         const transcript = event.transcript.map((t) => ({ ...t }));
@@ -567,6 +597,7 @@ async function main(): Promise<void> {
         publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
         checkAdmin: (req) => checkAdmin(req, adminToken),
         relationships,
+        isSessionNudged,
         onShare: () => {
           budget.record(0, 'admin:moment:share');
           log.info('admin.moment.share', {});
@@ -672,8 +703,14 @@ async function main(): Promise<void> {
         windowConversationCount: p.windowConversationCount,
         windowStartDay: p.windowStartDay,
       }));
+      const nudges = relationships.listNudges().map((n) => ({
+        a: n.a,
+        b: n.b,
+        direction: n.direction,
+        queuedAtSim: n.queuedAtSim,
+      }));
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, named: namedList, pairs }));
+      res.end(JSON.stringify({ ok: true, named: namedList, pairs, nudges }));
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/admin/sticky-metrics') {

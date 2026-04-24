@@ -65,6 +65,7 @@ interface FakeRuntimeCalls {
   event: Array<{ text: string; zone?: string | null; agentIds?: string[] }>;
   drop: Array<{ label: string; zone?: string | null; pos?: Vec2; id?: string }>;
   remove: Array<{ id: string }>;
+  nudge: Array<{ a: string; b: string; direction: 'spark' | 'tension' | 'reconcile' }>;
 }
 
 function fakeRuntime(
@@ -105,13 +106,26 @@ function fakeRuntime(
         summary: `removed ${input.id}`,
       };
     },
+    queueRelationshipNudge: (input: {
+      a: string;
+      b: string;
+      direction: 'spark' | 'tension' | 'reconcile';
+    }) => {
+      calls.nudge.push(input);
+      return {
+        simTime,
+        affected: [input.a, input.b],
+        summary: `nudge ${input.direction}: ${input.a} ↔ ${input.b}`,
+        nudge: { a: input.a, b: input.b, direction: input.direction, queuedAtSim: simTime },
+      };
+    },
   };
   return runtime as unknown as ReturnType<typeof fakeRuntime>;
 }
 
 function makeHandlers(
   adminToken: string | null = 'secret',
-  calls: FakeRuntimeCalls = { whisper: [], event: [], drop: [], remove: [] },
+  calls: FakeRuntimeCalls = { whisper: [], event: [], drop: [], remove: [], nudge: [] },
 ) {
   const broadcasts: Delta[] = [];
   const admits: InterventionKind[] = [];
@@ -283,9 +297,85 @@ describe('InterventionHandlers.tryHandle', () => {
     expect(broadcasts[1]).toMatchObject({ kind: 'intervention', type: 'object_remove' });
   });
 
+  it('nudge handler dispatches to queueRelationshipNudge and broadcasts the intervention delta', async () => {
+    const { handlers, calls, broadcasts, admits } = makeHandlers('secret');
+    const req = fakeReq({
+      method: 'POST',
+      headers: { 'x-admin-token': 'secret' },
+      body: { a: 'mei', b: 'bruno', direction: 'spark' },
+    });
+    const res = fakeRes();
+    await handlers.tryHandle(req, res, '/api/admin/intervention/nudge');
+    expect(res.statusCode).toBe(200);
+    expect(calls.nudge).toEqual([{ a: 'mei', b: 'bruno', direction: 'spark' }]);
+    expect(broadcasts[0]).toMatchObject({
+      kind: 'intervention',
+      type: 'relationship_nudge',
+      affected: ['mei', 'bruno'],
+    });
+    expect(admits).toEqual(['relationship_nudge']);
+  });
+
+  it('nudge handler rejects unknown direction and missing fields', async () => {
+    const { handlers } = makeHandlers('secret');
+    const bad = fakeReq({
+      method: 'POST',
+      headers: { 'x-admin-token': 'secret' },
+      body: { a: 'mei', b: 'bruno', direction: 'whoops' },
+    });
+    const badRes = fakeRes();
+    await handlers.tryHandle(bad, badRes, '/api/admin/intervention/nudge');
+    expect(badRes.statusCode).toBe(400);
+
+    const missing = fakeReq({
+      method: 'POST',
+      headers: { 'x-admin-token': 'secret' },
+      body: { a: 'mei', direction: 'spark' },
+    });
+    const missingRes = fakeRes();
+    await handlers.tryHandle(missing, missingRes, '/api/admin/intervention/nudge');
+    expect(missingRes.statusCode).toBe(400);
+  });
+
+  it('nudge endpoint shares the same per-IP rate limit as other interventions', async () => {
+    const now = 1_000_000;
+    const calls: FakeRuntimeCalls = { whisper: [], event: [], drop: [], remove: [], nudge: [] };
+    const runtime = fakeRuntime(calls);
+    const handlers = new InterventionHandlers({
+      runtime,
+      broadcast: () => {},
+      adminToken: 'secret',
+      perIpRatePerMin: 2,
+      globalRatePerMin: 100,
+      now: () => now,
+    });
+    const mk = () =>
+      fakeReq({
+        method: 'POST',
+        headers: { 'x-admin-token': 'secret' },
+        remoteAddress: '10.0.0.7',
+        body: { a: 'mei', b: 'bruno', direction: 'spark' },
+      });
+    const r1 = fakeRes();
+    const r2 = fakeRes();
+    const r3 = fakeRes();
+    await handlers.tryHandle(mk(), r1, '/api/admin/intervention/nudge');
+    await handlers.tryHandle(mk(), r2, '/api/admin/intervention/nudge');
+    await handlers.tryHandle(mk(), r3, '/api/admin/intervention/nudge');
+    expect(r1.statusCode).toBe(200);
+    expect(r2.statusCode).toBe(200);
+    expect(r3.statusCode).toBe(429);
+  });
+
   it('rate limits the same IP past perIpRatePerMin', async () => {
     let now = 1_000_000;
-    const runtime = fakeRuntime({ whisper: [], event: [], drop: [], remove: [] });
+    const runtime = fakeRuntime({
+      whisper: [],
+      event: [],
+      drop: [],
+      remove: [],
+      nudge: [],
+    });
     const handlers = new InterventionHandlers({
       runtime,
       broadcast: () => {},

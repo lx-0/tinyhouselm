@@ -5,7 +5,13 @@ import { simDay } from './plan.js';
 
 export const RELATIONSHIP_FILE = 'state.json';
 export const RELATIONSHIP_TMP_SUFFIX = '.tmp';
-export const RELATIONSHIP_RECORD_VERSION = 1;
+/**
+ * Bumped to 2 to add the `nudges` field (TINA-275). Older v1 payloads without
+ * `nudges` load fine — missing = empty queue — so boot after deploy is
+ * seamless; only the version field itself gates the load, and the old writer
+ * was never around to stamp v2, so we accept both on read.
+ */
+export const RELATIONSHIP_RECORD_VERSION = 2;
 
 /**
  * Weekly arc label for a pair. Derived deterministically from the 7-sim-day
@@ -33,6 +39,40 @@ export interface PairState {
   windowAffinityDelta: number;
 }
 
+/**
+ * Viewer-picked bias queued against a single pair (TINA-275). One-shot: the
+ * next named×named close between that exact pair consumes it, applies the
+ * bounded delta to affinity, and removes the entry. Stored alongside pair
+ * state and persisted on the same atomic write path.
+ */
+export type NudgeDirection = 'spark' | 'tension' | 'reconcile';
+
+export const NUDGE_DELTAS: Record<NudgeDirection, number> = {
+  spark: 0.25,
+  tension: -0.25,
+  reconcile: 0.15,
+};
+
+export interface PairNudge {
+  /** Canonical ordering: a < b (string-compare). */
+  a: string;
+  b: string;
+  direction: NudgeDirection;
+  queuedAtSim: SimTime;
+}
+
+/**
+ * Apply a queued nudge to a pair's current affinity. spark/reconcile floor
+ * at 0 first — they "cap the pair's current affinity into the positive band"
+ * per the v0.5 spec, so firing reconcile on an estranged pair actually
+ * lifts them. tension simply subtracts. Final value is clamped to [-1, +1].
+ */
+export function applyNudge(affinity: number, direction: NudgeDirection): number {
+  const delta = NUDGE_DELTAS[direction];
+  if (direction === 'tension') return clamp(affinity + delta, -1, 1);
+  return clamp(Math.max(0, affinity) + delta, -1, 1);
+}
+
 export type RelationshipLogger = (
   level: 'info' | 'warn' | 'error',
   event: string,
@@ -57,6 +97,8 @@ export interface RelationshipStoreOptions {
 interface PersistedShape {
   version: number;
   pairs: PairState[];
+  /** Pending viewer nudges (TINA-275). Absent on v1 payloads. */
+  nudges?: PairNudge[];
 }
 
 const DEFAULT_MAX_PAIRS = 200;
@@ -155,6 +197,7 @@ export class RelationshipStore {
   private readonly writer: (path: string, body: string) => Promise<void>;
   private readonly reader: (path: string) => Promise<string | null>;
   private readonly pairs = new Map<string, PairState>();
+  private readonly nudges = new Map<string, PairNudge>();
   private inFlight: Promise<void> | null = null;
   private dirty = false;
 
@@ -192,7 +235,10 @@ export class RelationshipStore {
     }
     if (!parsed || typeof parsed !== 'object') return;
     const shape = parsed as Partial<PersistedShape>;
-    if (shape.version !== RELATIONSHIP_RECORD_VERSION) {
+    // v1 predates the nudge queue (TINA-275). We accept it and treat nudges
+    // as empty — lets prod boot after deploy without manually discarding the
+    // existing relationships file.
+    if (shape.version !== RELATIONSHIP_RECORD_VERSION && shape.version !== 1) {
       this.log('warn', 'relationships.version.mismatch', {
         path,
         found: shape.version ?? null,
@@ -210,7 +256,26 @@ export class RelationshipStore {
       const canonB = p.a < p.b ? p.b : p.a;
       this.pairs.set(key, { ...p, a: canonA, b: canonB });
     }
-    this.log('info', 'relationships.loaded', { path, count: this.pairs.size });
+    const nArr = Array.isArray(shape.nudges) ? shape.nudges : [];
+    for (const n of nArr) {
+      if (!n || typeof n.a !== 'string' || typeof n.b !== 'string') continue;
+      if (n.direction !== 'spark' && n.direction !== 'tension' && n.direction !== 'reconcile') {
+        continue;
+      }
+      const canonA = n.a < n.b ? n.a : n.b;
+      const canonB = n.a < n.b ? n.b : n.a;
+      this.nudges.set(pairKey(n.a, n.b), {
+        a: canonA,
+        b: canonB,
+        direction: n.direction,
+        queuedAtSim: Number(n.queuedAtSim) || 0,
+      });
+    }
+    this.log('info', 'relationships.loaded', {
+      path,
+      count: this.pairs.size,
+      nudges: this.nudges.size,
+    });
   }
 
   count(): number {
@@ -224,6 +289,78 @@ export class RelationshipStore {
   getPair(a: string, b: string): PairState | null {
     if (a === b) return null;
     return this.pairs.get(pairKey(a, b)) ?? null;
+  }
+
+  /**
+   * Number of pending viewer nudges (TINA-275). Bounded in practice by the
+   * named roster (one nudge per pair max), but surfaced so tests can assert
+   * and admin can log.
+   */
+  nudgeCount(): number {
+    return this.nudges.size;
+  }
+
+  listNudges(): PairNudge[] {
+    return [...this.nudges.values()];
+  }
+
+  peekNudge(a: string, b: string): PairNudge | null {
+    if (a === b) return null;
+    return this.nudges.get(pairKey(a, b)) ?? null;
+  }
+
+  /**
+   * Queue a one-shot nudge against a pair. Replaces any existing queued nudge
+   * for the same pair — per spec, at most one queued nudge per pair
+   * (no cumulative stacking).
+   */
+  queueNudge(input: {
+    a: string;
+    b: string;
+    direction: NudgeDirection;
+    simTime: SimTime;
+  }): PairNudge {
+    if (input.a === input.b) throw new Error('queueNudge: pair ids must differ');
+    const canonA = input.a < input.b ? input.a : input.b;
+    const canonB = input.a < input.b ? input.b : input.a;
+    const nudge: PairNudge = {
+      a: canonA,
+      b: canonB,
+      direction: input.direction,
+      queuedAtSim: input.simTime,
+    };
+    this.nudges.set(pairKey(input.a, input.b), nudge);
+    this.scheduleFlush();
+    return nudge;
+  }
+
+  /**
+   * If a nudge is queued for this pair, apply its bounded delta to the pair's
+   * current affinity (+ window counters so the next arc rollover sees it),
+   * remove it from the queue, and return the consumed entry. Returns null
+   * when no nudge was queued or the pair has no recorded state yet (pair is
+   * created lazily by recordClose, so the caller should invoke this AFTER
+   * recordClose).
+   */
+  consumeNudgeOnClose(a: string, b: string): PairNudge | null {
+    if (a === b) return null;
+    const key = pairKey(a, b);
+    const nudge = this.nudges.get(key);
+    if (!nudge) return null;
+    const state = this.pairs.get(key);
+    if (!state) {
+      // recordClose should have created the pair; if we got here without
+      // one, leave the nudge queued and skip rather than fabricating state.
+      return null;
+    }
+    const before = state.affinity;
+    const after = applyNudge(before, nudge.direction);
+    const delta = after - before;
+    state.affinity = after;
+    state.windowAffinityDelta += delta;
+    this.nudges.delete(key);
+    this.scheduleFlush();
+    return nudge;
   }
 
   /**
@@ -355,6 +492,7 @@ export class RelationshipStore {
     const snapshot: PersistedShape = {
       version: RELATIONSHIP_RECORD_VERSION,
       pairs: [...this.pairs.values()],
+      nudges: [...this.nudges.values()],
     };
     const path = join(this.dir, RELATIONSHIP_FILE);
     const body = `${JSON.stringify(snapshot)}\n`;
@@ -381,6 +519,9 @@ export class RelationshipStore {
       const entry = sorted[i];
       if (!entry) break;
       this.pairs.delete(entry[0]);
+      // Drop any queued nudge for the same pair so the queue can't grow
+      // orphaned entries that no recordClose will ever consume.
+      this.nudges.delete(entry[0]);
     }
   }
 }

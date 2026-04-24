@@ -781,7 +781,7 @@ function renderObjectList(): void {
 }
 
 async function submitIntervention(
-  kind: 'whisper' | 'event' | 'object',
+  kind: 'whisper' | 'event' | 'object' | 'nudge',
   body: unknown,
   statusEl: HTMLElement,
   button: HTMLButtonElement,
@@ -966,6 +966,7 @@ interface StickyDailyRollup {
   momentUniqueVisits: number;
   returningVisits24h: number;
   returningVisits7d: number;
+  nudgesApplied?: number;
 }
 
 interface StickyMetricsPayload {
@@ -993,18 +994,21 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
   const table = document.createElement('table');
   table.className = 'sticky-table';
   const thead = document.createElement('thead');
-  thead.innerHTML = '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th></tr>';
+  thead.innerHTML =
+    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th></tr>';
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const d of rows) {
     const tr = document.createElement('tr');
     if (d.date === today) tr.className = 'today';
+    const nudges = d.nudgesApplied ?? 0;
     const cells: Array<[string, boolean]> = [
       [d.date.slice(5), false],
       [String(d.sharesCreated), d.sharesCreated === 0],
       [String(d.momentUniqueVisits), d.momentUniqueVisits === 0],
       [String(d.returningVisits24h), d.returningVisits24h === 0],
       [String(d.returningVisits7d), d.returningVisits7d === 0],
+      [String(nudges), nudges === 0],
     ];
     for (const [text, isZero] of cells) {
       const td = document.createElement('td');
@@ -1045,6 +1049,8 @@ setInterval(() => void fetchStickyMetrics(), 30_000);
 
 type ArcLabelUi = 'new' | 'warming' | 'cooling' | 'estranged' | 'steady';
 
+type NudgeDirectionUi = 'spark' | 'tension' | 'reconcile';
+
 interface ArcsPayload {
   ok: boolean;
   named: Array<{ id: string; name: string; color: string | null }>;
@@ -1057,7 +1063,17 @@ interface ArcsPayload {
     lastInteractionSim: number;
     windowConversationCount: number;
   }>;
+  nudges?: Array<{ a: string; b: string; direction: NudgeDirectionUi; queuedAtSim: number }>;
 }
+
+// Last-known named roster + queued nudges, cached so the nudge grid stays
+// populated between polls and so "queue nudge" can build its payload without
+// a refetch race.
+const nudgeState: {
+  named: Array<{ id: string; name: string }>;
+  queued: Map<string, NudgeDirectionUi>;
+  selected: { a: string; b: string } | null;
+} = { named: [], queued: new Map(), selected: null };
 
 const ARC_GLYPHS: Record<ArcLabelUi, string> = {
   new: '🌀',
@@ -1073,8 +1089,17 @@ function renderArcs(payload: ArcsPayload | null): void {
   if (!payload || !payload.ok) {
     arcBodyEl.textContent = 'unavailable';
     arcBodyEl.className = 'status err';
+    renderNudgeGrid();
     return;
   }
+  // Cache named roster + queued nudges for the nudge fieldset. We always
+  // refresh both so a nudge consumed since the last poll disappears.
+  nudgeState.named = payload.named.map((n) => ({ id: n.id, name: n.name }));
+  nudgeState.queued.clear();
+  for (const n of payload.nudges ?? []) {
+    nudgeState.queued.set(pairKeyUi(n.a, n.b), n.direction);
+  }
+  renderNudgeGrid();
   const named = payload.named;
   if (named.length === 0) {
     arcBodyEl.textContent = 'no named characters loaded';
@@ -1163,6 +1188,119 @@ void fetchArcs();
 // Arcs update at most on conversation close + once per sim-day rollover,
 // so a 20s poll is more than enough.
 setInterval(() => void fetchArcs(), 20_000);
+
+const NUDGE_GLYPHS: Record<NudgeDirectionUi, string> = {
+  spark: '✨',
+  tension: '⚡',
+  reconcile: '🤝',
+};
+
+const nudgeGridEl = document.getElementById('nudge-grid-body') as HTMLElement;
+const nudgeSendBtn = document.getElementById('nudge-send') as HTMLButtonElement;
+const nudgeStatusEl = document.getElementById('nudge-status') as HTMLElement;
+
+function pairKeyUi(a: string, b: string): string {
+  return a < b ? `${a}::${b}` : `${b}::${a}`;
+}
+
+/**
+ * Render the 5×5 pair grid. Cells show the queued nudge glyph (if any) or a
+ * dot for unqueued pairs; clicking a cell selects that pair — the "queue
+ * nudge" button then submits it with whichever radio is checked.
+ */
+function renderNudgeGrid(): void {
+  const named = nudgeState.named;
+  if (named.length === 0) {
+    nudgeGridEl.textContent = 'no named characters loaded';
+    nudgeGridEl.className = 'status';
+    nudgeSendBtn.disabled = true;
+    return;
+  }
+  const table = document.createElement('table');
+  table.className = 'nudge-grid';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.appendChild(document.createElement('th'));
+  for (const n of named) {
+    const th = document.createElement('th');
+    th.textContent = n.name.split(/\s+/)[0] ?? n.name;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const row of named) {
+    const tr = document.createElement('tr');
+    const rowHead = document.createElement('th');
+    rowHead.textContent = row.name.split(/\s+/)[0] ?? row.name;
+    tr.appendChild(rowHead);
+    for (const col of named) {
+      const td = document.createElement('td');
+      if (row.id === col.id) {
+        td.classList.add('self');
+        td.textContent = '·';
+      } else {
+        td.classList.add('pick');
+        const key = pairKeyUi(row.id, col.id);
+        const queued = nudgeState.queued.get(key);
+        if (queued) {
+          td.classList.add('queued');
+          td.textContent = NUDGE_GLYPHS[queued];
+          td.title = `${row.name} ↔ ${col.name}\nqueued: ${queued}`;
+        } else {
+          td.textContent = '·';
+          td.title = `${row.name} ↔ ${col.name}\n(no nudge queued)`;
+        }
+        if (
+          nudgeState.selected &&
+          pairKeyUi(nudgeState.selected.a, nudgeState.selected.b) === key
+        ) {
+          td.classList.add('selected');
+        }
+        td.dataset.a = row.id;
+        td.dataset.b = col.id;
+        td.addEventListener('click', () => {
+          nudgeState.selected = { a: row.id, b: col.id };
+          renderNudgeGrid();
+          nudgeSendBtn.disabled = false;
+          nudgeStatusEl.textContent = `${row.name} ↔ ${col.name}`;
+          nudgeStatusEl.className = 'status';
+        });
+      }
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  nudgeGridEl.className = '';
+  nudgeGridEl.replaceChildren(table);
+  nudgeSendBtn.disabled = nudgeState.selected === null;
+}
+
+function selectedDirection(): NudgeDirectionUi {
+  const el = document.querySelector<HTMLInputElement>('input[name="nudge-dir"]:checked');
+  const v = el?.value;
+  if (v === 'spark' || v === 'tension' || v === 'reconcile') return v;
+  return 'spark';
+}
+
+nudgeSendBtn.addEventListener('click', () => {
+  const pair = nudgeState.selected;
+  if (!pair) {
+    nudgeStatusEl.textContent = '✗ pick a pair';
+    nudgeStatusEl.className = 'status err';
+    return;
+  }
+  const body = { a: pair.a, b: pair.b, direction: selectedDirection() };
+  void submitIntervention('nudge', body, nudgeStatusEl, nudgeSendBtn).then((ok) => {
+    if (ok) {
+      // Optimistically mark the cell as queued until the next poll confirms.
+      nudgeState.queued.set(pairKeyUi(pair.a, pair.b), body.direction);
+      renderNudgeGrid();
+      void fetchArcs();
+    }
+  });
+});
 
 const toastEl = document.getElementById('toast') as HTMLElement;
 let toastTimer: number | null = null;

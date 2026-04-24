@@ -14,7 +14,11 @@ export interface HeardSpeech {
   source?: SpeechSource;
 }
 
-export type ObservedEventKind = 'world_event' | 'object_drop' | 'object_remove';
+export type ObservedEventKind =
+  | 'world_event'
+  | 'object_drop'
+  | 'object_remove'
+  | 'relationship_nudge';
 
 export interface ObservedEvent {
   kind: ObservedEventKind;

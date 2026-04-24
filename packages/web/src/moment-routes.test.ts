@@ -310,6 +310,60 @@ describe('MomentRoutes.handleShare', () => {
     expect(res.body).not.toContain('class="arc"');
   });
 
+  test('renders the viewer-nudged pill when isSessionNudged returns a direction (TINA-275)', () => {
+    const { store, record } = mkStore();
+    const routes = new MomentRoutes({
+      store,
+      checkAdmin: alwaysOk,
+      isSessionNudged: (sid) => (sid === record.sessionId ? 'spark' : null),
+    });
+    const res = mockRes();
+    routes.handleMomentPage(res, record.id);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('class="nudge"');
+    expect(res.body).toContain('data-nudge="spark"');
+    expect(res.body).toContain('viewer-nudged');
+  });
+
+  test('omits the nudge pill when the session was never nudged', () => {
+    const { store, record } = mkStore();
+    const routes = new MomentRoutes({
+      store,
+      checkAdmin: alwaysOk,
+      isSessionNudged: () => null,
+    });
+    const res = mockRes();
+    routes.handleMomentPage(res, record.id);
+    expect(res.body).not.toContain('class="nudge"');
+  });
+
+  test('omits the nudge pill when either participant is procedural', () => {
+    const store = new MomentStore({ maxMoments: 10, idGenerator: () => 'mix-n' });
+    store.captureClose(
+      {
+        sessionId: 'mix-ns',
+        simTime: 1000,
+        openedAt: 900,
+        transcript: [{ speakerId: 'mei', text: 'hi', at: 900 }],
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: '#ffaaaa' },
+          { id: 'stranger', name: 'Stranger', named: false, color: null },
+        ],
+        zone: 'cafe',
+        closeReason: 'idle',
+      },
+      deriveWorldClock(1000, 30),
+    );
+    const routes = new MomentRoutes({
+      store,
+      checkAdmin: alwaysOk,
+      isSessionNudged: () => 'spark',
+    });
+    const res = mockRes();
+    routes.handleMomentPage(res, 'mix-n');
+    expect(res.body).not.toContain('class="nudge"');
+  });
+
   test('rate-limits per-IP and returns 429', async () => {
     const { store } = mkStore();
     const nowMs = 1_000_000;

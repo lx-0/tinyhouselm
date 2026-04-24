@@ -214,6 +214,8 @@ function formatEvent(event: RuntimeEvent): string {
       return `t=${t}  tick=${tick}  reflection   ${event.agentId.padEnd(16)}  trigger=${event.trigger}  src=${event.sourceCount}  ${event.summary}`;
     case 'intervention':
       return `t=${t}  tick=${tick}  intervention ${event.type.padEnd(14)}  aff=${event.affected.length}  ${event.summary}`;
+    case 'relationship_nudge_applied':
+      return `t=${t}  tick=${tick}  nudge_applied ${event.direction.padEnd(10)}  ${event.a} ↔ ${event.b}  session=${event.sessionId}`;
   }
 }
 

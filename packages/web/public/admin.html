@@ -411,6 +411,52 @@
         margin-top: 4px;
         font-family: ui-monospace, Menlo, monospace;
       }
+      .nudge-grid {
+        margin-top: 6px;
+        border-collapse: collapse;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 9px;
+      }
+      .nudge-grid th,
+      .nudge-grid td {
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        padding: 3px 4px;
+        text-align: center;
+        min-width: 30px;
+        vertical-align: middle;
+      }
+      .nudge-grid th {
+        color: #8888aa;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .nudge-grid td.self { background: rgba(255,255,255,0.02); color: #55556a; }
+      .nudge-grid td.pick {
+        cursor: pointer;
+        color: #7a7a95;
+        user-select: none;
+      }
+      .nudge-grid td.pick:hover { background: rgba(185, 176, 220, 0.08); }
+      .nudge-grid td.pick.queued { background: rgba(245, 201, 122, 0.18); color: #f6e0b0; }
+      .nudge-grid td.pick.selected {
+        background: rgba(185, 176, 220, 0.28);
+        color: #e7e5ee;
+        outline: 1px solid #b9b0dc;
+      }
+      .nudge-dir {
+        display: flex;
+        gap: 10px;
+        margin-top: 6px;
+        font-size: 11px;
+      }
+      .nudge-dir label {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+      }
     </style>
   </head>
   <body>
@@ -448,7 +494,7 @@
               <legend>sticky metrics · 7d</legend>
               <div id="sticky-metrics-body" class="status">loading…</div>
               <div class="sticky-footnote">
-                shares · unique /moment visits · 24h + 7d returners (UTC days)
+                shares · unique /moment visits · 24h + 7d returners · nudges applied (UTC days)
               </div>
             </fieldset>
             <fieldset>
@@ -483,6 +529,19 @@
                 <button id="event-send" type="button">inject</button>
               </div>
               <div class="status" id="event-status"></div>
+            </fieldset>
+            <fieldset>
+              <legend>relationship nudge</legend>
+              <div id="nudge-grid-body" class="status">loading named roster…</div>
+              <div class="nudge-dir">
+                <label><input type="radio" name="nudge-dir" value="spark" checked />✨ spark</label>
+                <label><input type="radio" name="nudge-dir" value="tension" />⚡ tension</label>
+                <label><input type="radio" name="nudge-dir" value="reconcile" />🤝 reconcile</label>
+              </div>
+              <div class="row">
+                <button id="nudge-send" type="button" disabled>queue nudge</button>
+              </div>
+              <div class="status" id="nudge-status"></div>
             </fieldset>
             <fieldset>
               <legend>object</legend>

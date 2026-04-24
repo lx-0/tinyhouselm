@@ -33,7 +33,7 @@ import {
 } from './perception.js';
 import { type DayPlan, PlanRuntime, activeBlock, simHour } from './plan.js';
 import { ReflectionEngine, type ReflectionEngineOptions } from './reflection.js';
-import type { RelationshipStore } from './relationships.js';
+import type { NudgeDirection, PairNudge, RelationshipStore } from './relationships.js';
 import type { SkillDocument } from './skills.js';
 import { TelemetryCollector, type TelemetrySnapshot } from './telemetry.js';
 import { World } from './world.js';
@@ -168,6 +168,21 @@ export type RuntimeEvent =
       target: string | null;
       zone: string | null;
       affected: string[];
+    }
+  /**
+   * Emitted when a queued viewer nudge (TINA-275) is consumed by a named×named
+   * conversation close. Carries the session id so the web layer can annotate
+   * the matching `/moment/:id` page with a "viewer-nudged" pill, and the
+   * direction so counters / share-page copy can distinguish outcomes.
+   */
+  | {
+      kind: 'relationship_nudge_applied';
+      tick: number;
+      simTime: SimTime;
+      sessionId: string;
+      a: string;
+      b: string;
+      direction: NudgeDirection;
     };
 
 interface Recent {
@@ -214,6 +229,12 @@ export interface InterventionRemoveObjectInput {
   id: string;
 }
 
+export interface InterventionNudgeInput {
+  a: string;
+  b: string;
+  direction: NudgeDirection;
+}
+
 export interface InterventionResult {
   simTime: SimTime;
   affected: string[];
@@ -222,6 +243,10 @@ export interface InterventionResult {
 
 export interface InterventionDropResult extends InterventionResult {
   object: WorldObject;
+}
+
+export interface InterventionNudgeResult extends InterventionResult {
+  nudge: PairNudge;
 }
 
 export class Runtime {
@@ -638,7 +663,10 @@ export class Runtime {
         reason,
         detail: obs.text,
       });
-      const importance = obs.kind === 'world_event' ? 5 : 4;
+      // Nudges are softer than direct observations (the agent "overhears"
+      // secondhand), so they land at 3 — low enough that a burst of viewer
+      // nudges doesn't dominate the reflection importance budget.
+      const importance = obs.kind === 'world_event' ? 5 : obs.kind === 'relationship_nudge' ? 3 : 4;
       const fact = await memory.addFact({
         fact: obs.text,
         category: 'observation',
@@ -860,6 +888,101 @@ export class Runtime {
       simTime,
     });
     return { simTime, affected, summary: text };
+  }
+
+  /**
+   * Queue a viewer-picked one-shot bias against a named×named pair (TINA-275).
+   * The nudge consumes on the next close for that pair — applying a bounded
+   * affinity delta and shifting the window counters so the next weekly arc
+   * rollover reflects the shift. Both participants also get a deterministic
+   * `relationship_nudge` observation on their next tick, so their planner
+   * can replan on it (see handleInterventions).
+   */
+  queueRelationshipNudge(input: InterventionNudgeInput): InterventionNudgeResult {
+    if (!this.relationships) throw new Error('relationship store is not configured');
+    const direction = input.direction;
+    if (direction !== 'spark' && direction !== 'tension' && direction !== 'reconcile') {
+      throw new Error(`unknown nudge direction: ${String(direction)}`);
+    }
+    if (typeof input.a !== 'string' || !input.a.trim()) throw new Error('nudge a is required');
+    if (typeof input.b !== 'string' || !input.b.trim()) throw new Error('nudge b is required');
+    if (input.a === input.b) throw new Error('nudge pair must differ');
+    const aAgent = this.agents.find((x) => x.def.id === input.a);
+    const bAgent = this.agents.find((x) => x.def.id === input.b);
+    if (!aAgent) throw new Error(`unknown agent id: ${input.a}`);
+    if (!bAgent) throw new Error(`unknown agent id: ${input.b}`);
+    if (!aAgent.def.named || !bAgent.def.named) {
+      throw new Error('nudge pair must both be named characters');
+    }
+    const simTime = this.world.simTime;
+    const tick = this.tickIndex;
+    const nudge = this.relationships.queueNudge({
+      a: input.a,
+      b: input.b,
+      direction,
+      simTime,
+    });
+    // Perception text is deterministic (spec: "Keep text deterministic"). One
+    // line per direction, phrased from each recipient's POV — the other
+    // agent's name is the trigger so plans/replans can pick it up without
+    // inventing content about the viewer.
+    const textFor = (selfName: string, otherName: string): string => {
+      switch (direction) {
+        case 'spark':
+          return `${selfName} overheard that someone has been talking up ${otherName}`;
+        case 'tension':
+          return `${selfName} overheard that someone has been talking down ${otherName}`;
+        case 'reconcile':
+          return `${selfName} overheard that ${otherName} wants to patch things up`;
+      }
+    };
+    const expireAt = simTime + Math.max(1, (this.speechTtlMs / 1000) * this.clock.speed);
+    const aText = textFor(aAgent.def.name, bAgent.def.name);
+    const bText = textFor(bAgent.def.name, aAgent.def.name);
+    this.pendingObservations.push({
+      targetId: aAgent.def.id,
+      observed: {
+        kind: 'relationship_nudge',
+        source: 'intervention',
+        text: aText,
+        zone: null,
+        at: simTime,
+      },
+      expireAt,
+    });
+    this.pendingObservations.push({
+      targetId: bAgent.def.id,
+      observed: {
+        kind: 'relationship_nudge',
+        source: 'intervention',
+        text: bText,
+        zone: null,
+        at: simTime,
+      },
+      expireAt,
+    });
+    const summary = `nudge ${direction}: ${aAgent.def.name} ↔ ${bAgent.def.name}`;
+    const affected = [aAgent.def.id, bAgent.def.id];
+    this.emit({
+      kind: 'intervention',
+      tick,
+      simTime,
+      type: 'relationship_nudge',
+      summary,
+      target: null,
+      zone: null,
+      affected,
+    });
+    this.world.emit({
+      kind: 'intervention',
+      type: 'relationship_nudge',
+      summary,
+      target: null,
+      zone: null,
+      affected,
+      simTime,
+    });
+    return { simTime, affected, summary, nudge };
   }
 
   private nextInterventionId(prefix: string): string {
@@ -1113,6 +1236,22 @@ export class Runtime {
           simTime: session.lastActivityAt,
           turnCount: session.transcript.length,
         });
+        // Apply any queued viewer nudge for this pair (TINA-275). Consumed
+        // here rather than inside recordClose so the public recordClose API
+        // stays single-purpose. Emit a dedicated event the web layer can
+        // latch onto to annotate the moment page and bump sticky metrics.
+        const consumed = this.relationships.consumeNudgeOnClose(a, b);
+        if (consumed) {
+          this.emit({
+            kind: 'relationship_nudge_applied',
+            tick: this.tickIndex,
+            simTime: session.lastActivityAt,
+            sessionId: session.id,
+            a: consumed.a,
+            b: consumed.b,
+            direction: consumed.direction,
+          });
+        }
       }
     }
     const transcriptSummary = session.transcript

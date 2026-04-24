@@ -8,13 +8,17 @@ export const STICKY_METRICS_VERSION = 1;
 /**
  * Share-loop return-rate instrumentation (TINA-145).
  *
- * Tracks four counters with a 7-day daily rollup behind `/admin`:
+ * Tracks five counters with a 7-day daily rollup behind `/admin`:
  *   1. shares_created       — `/admin` Share clicks (one per successful mint).
  *   2. moment_unique_visits — unique visitors landing on `/moment/:id`,
  *                             deduped per-day by the `tvid` visitor cookie.
  *   3. returning_visits_24h — visitors whose first return-day happened
  *                             within 24h of their first-ever visit.
  *   4. returning_visits_7d  — same, within 7d. 24h ⊆ 7d by construction.
+ *   5. nudges_applied       — viewer `/admin` nudges that actually got
+ *                             consumed by a named×named close (TINA-275).
+ *                             Counts the signal, not the submission, so
+ *                             queued-but-never-consumed nudges are invisible.
  *
  * Constraints (see TINA-145):
  *   - Counter bumps are synchronous; persistence is fire-and-forget
@@ -69,6 +73,8 @@ interface DayState {
   momentExtraVisits: number;
   returns24h: number;
   returns7d: number;
+  /** Viewer nudges consumed by a close this day (TINA-275). */
+  nudgesApplied: number;
 }
 
 interface VisitorState {
@@ -85,6 +91,8 @@ interface PersistedDay {
   momentExtraVisits: number;
   returns24h: number;
   returns7d: number;
+  /** Absent on payloads written before TINA-275; treated as 0 on load. */
+  nudgesApplied?: number;
 }
 
 interface PersistedVisitor {
@@ -106,6 +114,7 @@ export interface DailyRollup {
   momentUniqueVisits: number;
   returningVisits24h: number;
   returningVisits7d: number;
+  nudgesApplied: number;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -219,6 +228,7 @@ export class StickyMetrics {
         momentExtraVisits: Number(d.momentExtraVisits) || 0,
         returns24h: Number(d.returns24h) || 0,
         returns7d: Number(d.returns7d) || 0,
+        nudgesApplied: Number(d.nudgesApplied) || 0,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -252,6 +262,18 @@ export class StickyMetrics {
   recordShare(): void {
     const day = this.day(dayKeyUtc(this.now()));
     day.shares += 1;
+    this.scheduleFlush();
+  }
+
+  /**
+   * Record a viewer nudge that was actually consumed by a named×named close
+   * (TINA-275). The counter intentionally tracks application, not queueing —
+   * a nudge that never gets consumed (pair never closes before LRU eviction,
+   * or the queued nudge is replaced) stays invisible.
+   */
+  recordNudge(): void {
+    const day = this.day(dayKeyUtc(this.now()));
+    day.nudgesApplied += 1;
     this.scheduleFlush();
   }
 
@@ -300,6 +322,7 @@ export class StickyMetrics {
         momentUniqueVisits: d ? d.momentVisitors.size + d.momentExtraVisits : 0,
         returningVisits24h: d?.returns24h ?? 0,
         returningVisits7d: d?.returns7d ?? 0,
+        nudgesApplied: d?.nudgesApplied ?? 0,
       });
     }
     return out;
@@ -333,6 +356,7 @@ export class StickyMetrics {
         momentExtraVisits: 0,
         returns24h: 0,
         returns7d: 0,
+        nudgesApplied: 0,
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -418,6 +442,7 @@ export class StickyMetrics {
         momentExtraVisits: d.momentExtraVisits,
         returns24h: d.returns24h,
         returns7d: d.returns7d,
+        nudgesApplied: d.nudgesApplied,
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,

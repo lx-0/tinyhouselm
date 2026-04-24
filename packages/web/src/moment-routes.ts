@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { MomentRecord } from '@tina/shared';
-import type { ArcLabel, RelationshipStore } from '@tina/sim';
+import type { ArcLabel, NudgeDirection, RelationshipStore } from '@tina/sim';
 import type { MomentStore } from './moments.js';
 
 export interface MomentRouteOptions {
@@ -25,6 +25,14 @@ export interface MomentRouteOptions {
    * — so a link sent 3 days ago reads differently today.
    */
   relationships?: RelationshipStore | null;
+  /**
+   * Render-time lookup for "was this session nudged?" (TINA-275). Returns
+   * the direction of the nudge that a named×named close consumed, or null
+   * if no nudge was ever applied to this session. Deliberately render-time
+   * only — never persisted into MomentRecord — so evicting the tracker
+   * just hides the pill without rewriting records.
+   */
+  isSessionNudged?: ((sessionId: string) => NudgeDirection | null) | null;
   now?: () => number;
 }
 
@@ -34,12 +42,30 @@ export interface ArcTag {
   glyph: string;
 }
 
+export interface NudgeTag {
+  direction: NudgeDirection;
+  label: string;
+  glyph: string;
+}
+
 const ARC_GLYPHS: Record<ArcLabel, string> = {
   new: '🌀',
   warming: '🌱',
   cooling: '🥶',
   estranged: '🔕',
   steady: '💤',
+};
+
+const NUDGE_GLYPHS: Record<NudgeDirection, string> = {
+  spark: '✨',
+  tension: '⚡',
+  reconcile: '🤝',
+};
+
+const NUDGE_LABELS: Record<NudgeDirection, string> = {
+  spark: 'viewer-nudged · spark',
+  tension: 'viewer-nudged · tension',
+  reconcile: 'viewer-nudged · reconcile',
 };
 
 interface Bucket {
@@ -58,6 +84,7 @@ export class MomentRoutes {
   private readonly perIpRate: number;
   private readonly globalRate: number;
   private readonly relationships: RelationshipStore | null;
+  private readonly isSessionNudged: ((sessionId: string) => NudgeDirection | null) | null;
   private readonly now: () => number;
   private readonly perIp = new Map<string, Bucket>();
   private readonly globalBucket: Bucket = { count: 0, windowStart: 0 };
@@ -70,6 +97,7 @@ export class MomentRoutes {
     this.perIpRate = opts.perIpSharePerMin ?? 20;
     this.globalRate = opts.globalSharePerMin ?? 120;
     this.relationships = opts.relationships ?? null;
+    this.isSessionNudged = opts.isSessionNudged ?? null;
     this.now = opts.now ?? (() => Date.now());
   }
 
@@ -88,12 +116,37 @@ export class MomentRoutes {
       return;
     }
     const arc = this.resolveArc(rec);
+    const nudge = this.resolveNudge(rec);
     const html = renderMomentHtml(
       rec,
       this.buildCanonicalUrl(canonicalPath ?? `/moment/${id}`),
       arc,
+      nudge,
     );
     writeHtml(res, 200, html);
+  }
+
+  /**
+   * Render-time check for whether a viewer nudge was consumed by the close
+   * that produced this moment (TINA-275). Only returns a tag when both
+   * participants are named (nudges only apply to named×named) and the
+   * session id is known to the live tracker. Never persisted.
+   */
+  private resolveNudge(rec: MomentRecord): NudgeTag | null {
+    if (!this.isSessionNudged) return null;
+    if (rec.participants.length !== 2) return null;
+    const [p1, p2] = rec.participants as [
+      MomentRecord['participants'][number],
+      MomentRecord['participants'][number],
+    ];
+    if (!p1.named || !p2.named) return null;
+    const direction = this.isSessionNudged(rec.sessionId);
+    if (!direction) return null;
+    return {
+      direction,
+      label: NUDGE_LABELS[direction],
+      glyph: NUDGE_GLYPHS[direction],
+    };
   }
 
   /**
@@ -270,7 +323,12 @@ export function buildMomentDescription(rec: MomentRecord, max = 160): string {
   return truncate(lines.join(' · '), max);
 }
 
-function renderMomentHtml(rec: MomentRecord, canonical: string, arc: ArcTag | null): string {
+function renderMomentHtml(
+  rec: MomentRecord,
+  canonical: string,
+  arc: ArcTag | null,
+  nudge: NudgeTag | null,
+): string {
   const title = escapeHtml(rec.headline);
   const description = escapeHtml(buildMomentDescription(rec));
   const canonicalEsc = escapeHtml(canonical);
@@ -302,6 +360,9 @@ function renderMomentHtml(rec: MomentRecord, canonical: string, arc: ArcTag | nu
   const closeReason = escapeHtml(rec.closeReason);
   const arcHtml = arc
     ? `<div class="arc" data-arc="${escapeHtml(arc.label)}"><span class="glyph">${escapeHtml(arc.glyph)}</span><span>${escapeHtml(arc.headline)}</span></div>`
+    : '';
+  const nudgeHtml = nudge
+    ? `<div class="nudge" data-nudge="${escapeHtml(nudge.direction)}"><span class="glyph">${escapeHtml(nudge.glyph)}</span><span>${escapeHtml(nudge.label)}</span></div>`
     : '';
 
   return `<!doctype html>
@@ -338,6 +399,11 @@ function renderMomentHtml(rec: MomentRecord, canonical: string, arc: ArcTag | nu
     .arc[data-arc="steady"] { background: rgba(200, 200, 200, 0.10); color: #cccccc; }
     .arc[data-arc="new"] { background: rgba(245, 201, 122, 0.14); color: #f0d8a8; }
     .arc .glyph { font-size: 14px; }
+    .nudge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 11px; letter-spacing: 0.04em; margin: 0 0 16px 8px; background: rgba(245, 201, 122, 0.14); color: #f0d8a8; }
+    .nudge[data-nudge="spark"] { background: rgba(245, 201, 122, 0.18); color: #f6e0b0; }
+    .nudge[data-nudge="tension"] { background: rgba(230, 150, 150, 0.18); color: #f2c3c3; }
+    .nudge[data-nudge="reconcile"] { background: rgba(150, 210, 180, 0.18); color: #c9e9d6; }
+    .nudge .glyph { font-size: 12px; }
     .transcript { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 14px 16px; background: rgba(255,255,255,0.02); }
     .turn { font-size: 13px; line-height: 1.55; margin: 4px 0; word-break: break-word; }
     .turn .name { color: #b9b0dc; font-weight: 500; margin-right: 2px; }
@@ -355,7 +421,7 @@ function renderMomentHtml(rec: MomentRecord, canonical: string, arc: ArcTag | nu
     </header>
     <h1>${title}</h1>
     <div class="meta">${clockLine} · closed (${closeReason}) · captured ${capturedAt}</div>
-    ${arcHtml}
+    ${arcHtml}${nudgeHtml}
     <div class="chips">${participantChips}</div>
     <div class="transcript">${turnsHtml || '<div class="turn" style="opacity:0.6">(no transcript captured)</div>'}</div>
     ${reflectionHtml}

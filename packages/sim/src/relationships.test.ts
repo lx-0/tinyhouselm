@@ -3,9 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  NUDGE_DELTAS,
   RELATIONSHIP_FILE,
   RELATIONSHIP_RECORD_VERSION,
   RelationshipStore,
+  applyNudge,
   computeAffinityDelta,
   deriveArcLabel,
   pairKey,
@@ -242,5 +244,166 @@ describe('RelationshipStore', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('RelationshipStore nudge queue (TINA-275)', () => {
+  it('applyNudge floors into positive band for spark and reconcile', () => {
+    expect(applyNudge(-0.4, 'spark')).toBeCloseTo(NUDGE_DELTAS.spark);
+    expect(applyNudge(-0.4, 'reconcile')).toBeCloseTo(NUDGE_DELTAS.reconcile);
+    // tension does NOT floor — it actually drops from an already-negative value.
+    expect(applyNudge(-0.4, 'tension')).toBeCloseTo(-0.65);
+    // Positive base adds directly.
+    expect(applyNudge(0.3, 'spark')).toBeCloseTo(0.55);
+    // Clamp to +1.
+    expect(applyNudge(0.95, 'spark')).toBe(1);
+    // Clamp to -1.
+    expect(applyNudge(-0.9, 'tension')).toBe(-1);
+  });
+
+  it('queueNudge stores one entry per pair and replaces on re-queue', () => {
+    const store = new RelationshipStore();
+    store.queueNudge({ a: 'mei', b: 'bruno', direction: 'spark', simTime: 100 });
+    expect(store.nudgeCount()).toBe(1);
+    const peek1 = store.peekNudge('bruno', 'mei')!;
+    expect(peek1.direction).toBe('spark');
+    // Canonical ordering is enforced regardless of argument order.
+    expect(peek1.a).toBe('bruno');
+    expect(peek1.b).toBe('mei');
+
+    // Re-queue replaces the prior direction — no cumulative stacking.
+    store.queueNudge({ a: 'mei', b: 'bruno', direction: 'tension', simTime: 200 });
+    expect(store.nudgeCount()).toBe(1);
+    expect(store.peekNudge('mei', 'bruno')!.direction).toBe('tension');
+  });
+
+  it('queueNudge rejects same-id pair', () => {
+    const store = new RelationshipStore();
+    expect(() =>
+      store.queueNudge({ a: 'mei', b: 'mei', direction: 'spark', simTime: 1 }),
+    ).toThrow();
+  });
+
+  it('consumeNudgeOnClose applies the bounded delta once and removes the queue entry', () => {
+    const store = new RelationshipStore();
+    store.recordClose({ a: 'mei', b: 'bruno', simTime: 10, turnCount: 4 });
+    const before = store.getPair('mei', 'bruno')!.affinity; // ~0.08
+    store.queueNudge({ a: 'mei', b: 'bruno', direction: 'spark', simTime: 20 });
+
+    // First close consumes it.
+    store.recordClose({ a: 'mei', b: 'bruno', simTime: 30, turnCount: 4 });
+    const consumed = store.consumeNudgeOnClose('mei', 'bruno');
+    expect(consumed?.direction).toBe('spark');
+    const afterNudge = store.getPair('mei', 'bruno')!.affinity;
+    // Natural delta (+0.08) plus the spark delta (+0.25), clamped.
+    expect(afterNudge).toBeGreaterThan(before + 0.2);
+    expect(store.nudgeCount()).toBe(0);
+    // windowAffinityDelta reflects BOTH deltas so the next weekly rollover
+    // sees the viewer's bias.
+    expect(store.getPair('mei', 'bruno')!.windowAffinityDelta).toBeGreaterThan(0.3);
+
+    // A second close does NOT re-apply — the queue is empty.
+    expect(store.consumeNudgeOnClose('mei', 'bruno')).toBeNull();
+  });
+
+  it('consumeNudgeOnClose with reconcile lifts an estranged pair into the positive band', () => {
+    const store = new RelationshipStore();
+    // Force an estranged baseline — we manipulate through repeated closes
+    // which always push positive, so instead queue + apply a tension first.
+    store.recordClose({ a: 'ava', b: 'kenji', simTime: 10, turnCount: 1 });
+    // Tension drives affinity below zero.
+    store.queueNudge({ a: 'ava', b: 'kenji', direction: 'tension', simTime: 20 });
+    store.recordClose({ a: 'ava', b: 'kenji', simTime: 30, turnCount: 1 });
+    store.consumeNudgeOnClose('ava', 'kenji');
+    const estranged = store.getPair('ava', 'kenji')!.affinity;
+    expect(estranged).toBeLessThan(0);
+
+    // Reconcile lifts them back above zero (+0.15 floored from 0).
+    store.queueNudge({ a: 'ava', b: 'kenji', direction: 'reconcile', simTime: 40 });
+    store.recordClose({ a: 'ava', b: 'kenji', simTime: 50, turnCount: 1 });
+    store.consumeNudgeOnClose('ava', 'kenji');
+    const reconciled = store.getPair('ava', 'kenji')!.affinity;
+    expect(reconciled).toBeGreaterThan(0);
+  });
+
+  it('consumeNudgeOnClose returns null when no nudge is queued', () => {
+    const store = new RelationshipStore();
+    store.recordClose({ a: 'mei', b: 'bruno', simTime: 10, turnCount: 4 });
+    expect(store.consumeNudgeOnClose('mei', 'bruno')).toBeNull();
+  });
+
+  it('persists nudges across restart via load/flush', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'tina-rel-nudge-'));
+    try {
+      const write = new RelationshipStore({ dir });
+      write.recordClose({ a: 'mei', b: 'bruno', simTime: 100, turnCount: 4 });
+      write.queueNudge({ a: 'mei', b: 'bruno', direction: 'spark', simTime: 150 });
+      await write.flush();
+
+      const raw = await readFile(join(dir, RELATIONSHIP_FILE), 'utf8');
+      const parsed = JSON.parse(raw);
+      expect(parsed.nudges).toHaveLength(1);
+      expect(parsed.nudges[0]).toMatchObject({ direction: 'spark' });
+
+      const read = new RelationshipStore({ dir });
+      await read.load();
+      const peeked = read.peekNudge('mei', 'bruno');
+      expect(peeked?.direction).toBe('spark');
+
+      // Consumption persists too.
+      read.recordClose({ a: 'mei', b: 'bruno', simTime: 200, turnCount: 2 });
+      read.consumeNudgeOnClose('mei', 'bruno');
+      await read.flush();
+      const again = new RelationshipStore({ dir });
+      await again.load();
+      expect(again.nudgeCount()).toBe(0);
+      expect(again.getPair('mei', 'bruno')!.affinity).toBeGreaterThan(0.3);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts v1 on-disk payloads without a nudges field (seamless upgrade)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'tina-rel-v1-'));
+    try {
+      const v1 = {
+        version: 1,
+        pairs: [
+          {
+            a: 'bruno',
+            b: 'mei',
+            affinity: 0.5,
+            lastInteractionSim: 100,
+            sharedConversationCount: 2,
+            arcLabel: 'steady',
+            windowStartDay: 0,
+            windowConversationCount: 1,
+            windowAffinityDelta: 0.1,
+          },
+        ],
+      };
+      const { writeFile } = await import('node:fs/promises');
+      await writeFile(join(dir, RELATIONSHIP_FILE), `${JSON.stringify(v1)}\n`, 'utf8');
+
+      const store = new RelationshipStore({ dir });
+      await store.load();
+      expect(store.count()).toBe(1);
+      expect(store.nudgeCount()).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('LRU eviction drops orphan nudges', () => {
+    const store = new RelationshipStore({ maxPairs: 2 });
+    store.recordClose({ a: 'a', b: 'b', simTime: 1, turnCount: 1 });
+    store.queueNudge({ a: 'a', b: 'b', direction: 'spark', simTime: 2 });
+    expect(store.nudgeCount()).toBe(1);
+    store.recordClose({ a: 'c', b: 'd', simTime: 3, turnCount: 1 });
+    store.recordClose({ a: 'e', b: 'f', simTime: 4, turnCount: 1 });
+    // a↔b evicted as oldest; its nudge is gone too (no orphans).
+    expect(store.getPair('a', 'b')).toBeNull();
+    expect(store.peekNudge('a', 'b')).toBeNull();
+    expect(store.nudgeCount()).toBe(0);
   });
 });

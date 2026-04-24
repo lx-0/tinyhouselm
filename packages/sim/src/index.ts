@@ -101,12 +101,16 @@ export {
   RelationshipStore,
   RELATIONSHIP_FILE,
   RELATIONSHIP_RECORD_VERSION,
+  NUDGE_DELTAS,
+  applyNudge,
   pairKey,
   computeAffinityDelta,
   deriveArcLabel,
 } from './relationships.js';
 export type {
   ArcLabel,
+  NudgeDirection,
+  PairNudge,
   PairState,
   RelationshipLogger,
   RelationshipStoreOptions,
@@ -123,8 +127,10 @@ export type {
   InterventionEventInput,
   InterventionDropObjectInput,
   InterventionRemoveObjectInput,
+  InterventionNudgeInput,
   InterventionResult,
   InterventionDropResult,
+  InterventionNudgeResult,
 } from './runtime.js';
 export { TelemetryCollector } from './telemetry.js';
 export type { TelemetrySnapshot, TelemetryOptions } from './telemetry.js';

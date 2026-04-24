@@ -60,8 +60,9 @@ export class InterventionHandlers {
     const kind = pathname.slice('/api/admin/intervention/'.length) as
       | 'whisper'
       | 'event'
-      | 'object';
-    if (!['whisper', 'event', 'object'].includes(kind)) return false;
+      | 'object'
+      | 'nudge';
+    if (!['whisper', 'event', 'object', 'nudge'].includes(kind)) return false;
 
     const authResult = this.checkAuth(req);
     if (!authResult.ok) {
@@ -88,6 +89,8 @@ export class InterventionHandlers {
         await this.handleWhisper(res, body);
       } else if (kind === 'event') {
         await this.handleEvent(res, body);
+      } else if (kind === 'nudge') {
+        await this.handleNudge(res, body);
       } else {
         await this.handleObject(res, body);
       }
@@ -182,6 +185,28 @@ export class InterventionHandlers {
       return;
     }
     throw new Error(`unknown op: ${op}`);
+  }
+
+  private async handleNudge(res: ServerResponse, body: unknown): Promise<void> {
+    const input = body as { a?: unknown; b?: unknown; direction?: unknown };
+    const a = expectString(input.a, 'a', { max: 120 });
+    const b = expectString(input.b, 'b', { max: 120 });
+    const direction = expectString(input.direction, 'direction', { max: 16 });
+    if (direction !== 'spark' && direction !== 'tension' && direction !== 'reconcile') {
+      throw new Error('direction must be spark | tension | reconcile');
+    }
+    const result = this.runtime.queueRelationshipNudge({ a, b, direction });
+    this.onAdmit?.('relationship_nudge');
+    this.broadcast({
+      kind: 'intervention',
+      type: 'relationship_nudge',
+      summary: result.summary,
+      target: null,
+      zone: null,
+      affected: result.affected,
+      simTime: result.simTime,
+    });
+    writeJson(res, 200, { ok: true, ...result });
   }
 
   private checkAuth(

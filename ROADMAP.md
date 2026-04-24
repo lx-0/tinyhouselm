@@ -44,14 +44,14 @@ Goal: when something memorable happens, a visitor can grab a link that captures 
 - `TINA-100` — **Richer schedules for named characters. ✅** _(shipped 2026-04-23.)_ Per-hour authored schedules so named personas have distinct daily rhythms that make their moments recognizable.
 - `TINA-145` — **Share-link return-rate instrumentation. ✅** _(shipped 2026-04-23 ~18:36.)_ Four counters (share creates, unique /moment visits, 24h returners, 7d returners) + /admin sticky-metrics panel, JSONL-backed, no external analytics. Earliest clean 7-day read: **2026-04-30**.
 - `TINA-207` — **Named-character relationship arcs. ✅** _(shipped 2026-04-24.)_ Affinity updates on named×named closes, weekly deterministic rollover inside `tickOnce`, 5×5 admin grid, `/moment/:id` surfaces current arc label at render time. Leisure wander zones biased by `Perception.zoneAffinityHints`.
+- `TINA-275` — **Arc-driven interventions. ✅** _(shipped 2026-04-24.)_ New `relationship_nudge` intervention (spark / tension / reconcile), persisted one-shot queue in `RelationshipStore`, consumed on next named×named close, both participants receive a deterministic perception event, `/admin` 5×5 pair picker + three-way radio, `/moment/:id` "viewer-nudged" pill at render time, new `nudges_applied` counter in the sticky-metrics rollup.
 
-### Next unblocked (pick after v0.5 #4)
+### Next unblocked (pick after v0.5 #5)
 
 Depth over breadth until TINA-145 has 7 clean days. "Second authored town" is deferred until **2026-04-30** — only pick it if the first town's return-rate holds up. If it's weak, keep compounding depth on the features above.
 
 Candidates (pick one at a time):
 
-- **Arc-driven interventions.** Extend the /admin intervention system with a `relationship_nudge` type that biases the next named×named close (bounded ±0.25, rate-limited, perception-stream integrated like existing interventions). Closes the loop: viewer acts → arc label shifts within a sim-day → shareable before/after. Stacks cleanly with TINA-17 + TINA-207.
 - **Multi-character events.** Co-presence of 3+ named characters in a zone triggers a group-moment record with its own `/moment/:id` variant. Stacks with TINA-29 + TINA-207.
 - **Zone affordance interventions.** Drop-object (TINA-17) already perception-streams; extend with typed affordances (benches, music, food) that named characters actually route to, amplifying per-zone behavior.
 

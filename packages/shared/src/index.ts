@@ -160,7 +160,12 @@ export type WorldObject = {
   droppedAtSim: SimTime;
 };
 
-export type InterventionKind = 'whisper' | 'world_event' | 'object_drop' | 'object_remove';
+export type InterventionKind =
+  | 'whisper'
+  | 'world_event'
+  | 'object_drop'
+  | 'object_remove'
+  | 'relationship_nudge';
 
 export type ConversationTurn = {
   speakerId: string;
