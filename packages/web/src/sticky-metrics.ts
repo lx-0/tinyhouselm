@@ -81,6 +81,8 @@ interface DayState {
   nudgesApplied: number;
   /** 3+ named co-presence moments minted this day (TINA-345). */
   groupMomentsCreated: number;
+  /** Affordance-object uses bumped this day (TINA-416). */
+  affordanceUses: number;
 }
 
 interface VisitorState {
@@ -101,6 +103,8 @@ interface PersistedDay {
   nudgesApplied?: number;
   /** Absent on payloads written before TINA-345; treated as 0 on load. */
   groupMomentsCreated?: number;
+  /** Absent on payloads written before TINA-416; treated as 0 on load. */
+  affordanceUses?: number;
 }
 
 interface PersistedVisitor {
@@ -124,6 +128,8 @@ export interface DailyRollup {
   returningVisits7d: number;
   nudgesApplied: number;
   groupMomentsCreated: number;
+  /** Affordance-object uses bumped this day (TINA-416). */
+  affordanceUses: number;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -239,6 +245,7 @@ export class StickyMetrics {
         returns7d: Number(d.returns7d) || 0,
         nudgesApplied: Number(d.nudgesApplied) || 0,
         groupMomentsCreated: Number(d.groupMomentsCreated) || 0,
+        affordanceUses: Number(d.affordanceUses) || 0,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -299,6 +306,17 @@ export class StickyMetrics {
   }
 
   /**
+   * Record a named character using a typed affordance object (TINA-416). The
+   * runtime already dedupes rapid-fire uses per (agent, object) via its own
+   * cooldown, so every call here is a real distinct "use" worth surfacing.
+   */
+  recordAffordanceUse(): void {
+    const day = this.day(dayKeyUtc(this.now()));
+    day.affordanceUses += 1;
+    this.scheduleFlush();
+  }
+
+  /**
    * Record a visit to `/moment/:id`. Dedupes by visitor per-day up to the
    * configured cap; past the cap the counter still climbs so the 7-day
    * rollup stays directionally correct.
@@ -345,6 +363,7 @@ export class StickyMetrics {
         returningVisits7d: d?.returns7d ?? 0,
         nudgesApplied: d?.nudgesApplied ?? 0,
         groupMomentsCreated: d?.groupMomentsCreated ?? 0,
+        affordanceUses: d?.affordanceUses ?? 0,
       });
     }
     return out;
@@ -380,6 +399,7 @@ export class StickyMetrics {
         returns7d: 0,
         nudgesApplied: 0,
         groupMomentsCreated: 0,
+        affordanceUses: 0,
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -467,6 +487,7 @@ export class StickyMetrics {
         returns7d: d.returns7d,
         nudgesApplied: d.nudgesApplied,
         groupMomentsCreated: d.groupMomentsCreated,
+        affordanceUses: d.affordanceUses,
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,

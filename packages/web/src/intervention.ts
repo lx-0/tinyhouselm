@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Delta, InterventionKind, Vec2 } from '@tina/shared';
+import type { Delta, InterventionKind, ObjectAffordance, Vec2 } from '@tina/shared';
 import type { Runtime } from '@tina/sim';
+
+const VALID_AFFORDANCES: ReadonlySet<ObjectAffordance> = new Set(['bench', 'music', 'food']);
 
 export interface InterventionHandlerOptions {
   runtime: Runtime;
@@ -147,6 +149,7 @@ export class InterventionHandlers {
       label?: unknown;
       pos?: unknown;
       zone?: unknown;
+      affordance?: unknown;
     };
     const op = expectString(input.op, 'op');
     if (op === 'drop') {
@@ -154,7 +157,9 @@ export class InterventionHandlers {
       const zone = input.zone == null ? null : expectString(input.zone, 'zone', { max: 120 });
       const pos = input.pos == null ? undefined : expectVec2(input.pos, 'pos');
       const id = input.id == null ? undefined : expectString(input.id, 'id', { max: 120 });
-      const result = this.runtime.dropObject({ id, label, pos, zone });
+      const affordance =
+        input.affordance == null ? null : expectAffordance(input.affordance, 'affordance');
+      const result = this.runtime.dropObject({ id, label, pos, zone, affordance });
       this.onAdmit?.('object_drop');
       this.broadcast({
         kind: 'intervention',
@@ -320,6 +325,14 @@ function expectInt(value: unknown, name: string): number {
     throw new Error(`${name} must be an integer`);
   }
   return value;
+}
+
+function expectAffordance(value: unknown, name: string): ObjectAffordance {
+  if (typeof value !== 'string') throw new Error(`${name} must be a string`);
+  if (!VALID_AFFORDANCES.has(value as ObjectAffordance)) {
+    throw new Error(`${name} must be one of: bench, music, food`);
+  }
+  return value as ObjectAffordance;
 }
 
 function timingSafeEqual(a: string, b: string): boolean {

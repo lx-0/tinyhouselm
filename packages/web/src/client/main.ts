@@ -297,6 +297,44 @@ function locationGlyph(loc: Location): string {
   return '•';
 }
 
+/**
+ * Per-affordance glyph + halo + label tint for dropped objects (TINA-416).
+ * Untyped drops keep the original gold sparkle so existing TINA-17 demos
+ * render unchanged.
+ */
+function objectAffordanceStyle(affordance: string | null): {
+  glyph: string;
+  halo: string;
+  label: string;
+} {
+  switch (affordance) {
+    case 'bench':
+      return {
+        glyph: '🪑',
+        halo: 'rgba(180, 220, 255, 0.28)',
+        label: 'rgba(200, 230, 255, 0.9)',
+      };
+    case 'music':
+      return {
+        glyph: '🎵',
+        halo: 'rgba(220, 180, 255, 0.28)',
+        label: 'rgba(230, 200, 255, 0.9)',
+      };
+    case 'food':
+      return {
+        glyph: '🍞',
+        halo: 'rgba(255, 200, 140, 0.28)',
+        label: 'rgba(255, 215, 170, 0.9)',
+      };
+    default:
+      return {
+        glyph: '✨',
+        halo: 'rgba(255, 220, 120, 0.25)',
+        label: 'rgba(255, 230, 170, 0.9)',
+      };
+  }
+}
+
 function roundRect(
   c: CanvasRenderingContext2D,
   x: number,
@@ -411,18 +449,21 @@ function draw(): void {
     ctx.fillText(locationGlyph(loc), cx, cy);
   }
 
-  // Intervention-dropped objects — small star glyph + label.
+  // Intervention-dropped objects (TINA-17 + TINA-416 typed affordances).
+  // Untyped: gold sparkle. Typed: per-affordance glyph + tinted halo so
+  // viewers can tell at a glance which kind they dropped.
   ctx.font = `${Math.floor(TILE * 0.55)}px ui-sans-serif, system-ui, "Apple Color Emoji", "Segoe UI Emoji"`;
   for (const obj of state.objects.values()) {
     const cx = obj.pos.x * TILE + TILE / 2;
     const cy = obj.pos.y * TILE + TILE / 2;
-    ctx.fillStyle = 'rgba(255, 220, 120, 0.25)';
+    const style = objectAffordanceStyle(obj.affordance ?? null);
+    ctx.fillStyle = style.halo;
     ctx.beginPath();
     ctx.arc(cx, cy, TILE * 0.36, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillText('✨', cx, cy);
+    ctx.fillText(style.glyph, cx, cy);
     ctx.font = '9px ui-monospace, Menlo, monospace';
-    ctx.fillStyle = 'rgba(255, 230, 170, 0.9)';
+    ctx.fillStyle = style.label;
     ctx.fillText(obj.label, cx, cy + TILE * 0.55);
     ctx.font = `${Math.floor(TILE * 0.55)}px ui-sans-serif, system-ui, "Apple Color Emoji", "Segoe UI Emoji"`;
   }

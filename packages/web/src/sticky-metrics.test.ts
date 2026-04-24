@@ -43,6 +43,7 @@ describe('StickyMetrics.recordShare', () => {
       returningVisits7d: 0,
       nudgesApplied: 0,
       groupMomentsCreated: 0,
+      affordanceUses: 0,
     });
     expect(r[0]!.date).toBe('2026-04-17');
   });
@@ -266,6 +267,59 @@ describe('StickyMetrics.recordGroupMoment (TINA-345)', () => {
     expect(today.sharesCreated).toBe(2);
     expect(today.nudgesApplied).toBe(1);
     expect(today.groupMomentsCreated).toBe(0);
+  });
+});
+
+describe('StickyMetrics.recordAffordanceUse (TINA-416)', () => {
+  test('bumps today bucket and rolls forward', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-24T10:00:00Z') });
+    m.recordAffordanceUse();
+    m.recordAffordanceUse();
+    m.recordAffordanceUse();
+    expect(m.rollup(7).at(-1)!.affordanceUses).toBe(3);
+    expect(m.rollup(7).at(0)!.affordanceUses).toBe(0);
+  });
+
+  test('persists across a load-write-load cycle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-aff-'));
+    const ref = { ms: Date.parse('2026-04-24T10:00:00Z') };
+    const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m1.load();
+    m1.recordAffordanceUse();
+    m1.recordAffordanceUse();
+    await m1.flush();
+
+    const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m2.load();
+    expect(m2.rollup(7).at(-1)!.affordanceUses).toBe(2);
+  });
+
+  test('pre-TINA-416 persisted shape (no affordanceUses field) loads as 0', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-legacy-aff-'));
+    const legacy = {
+      version: 1,
+      days: [
+        {
+          date: '2026-04-24',
+          shares: 2,
+          momentVisitors: [],
+          momentExtraVisits: 0,
+          returns24h: 0,
+          returns7d: 0,
+          nudgesApplied: 0,
+          groupMomentsCreated: 1,
+        },
+      ],
+      visitors: [],
+    };
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(join(dir, STICKY_METRICS_FILE), `${JSON.stringify(legacy)}\n`, 'utf8');
+    const m = new StickyMetrics({ dir, now: clockAt('2026-04-24T10:00:00Z') });
+    await m.load();
+    const today = m.rollup(7).at(-1)!;
+    expect(today.sharesCreated).toBe(2);
+    expect(today.groupMomentsCreated).toBe(1);
+    expect(today.affordanceUses).toBe(0);
   });
 });
 

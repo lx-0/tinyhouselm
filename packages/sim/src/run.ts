@@ -218,6 +218,8 @@ function formatEvent(event: RuntimeEvent): string {
       return `t=${t}  tick=${tick}  nudge_applied ${event.direction.padEnd(10)}  ${event.a} ↔ ${event.b}  session=${event.sessionId}`;
     case 'group_moment':
       return `t=${t}  tick=${tick}  group_moment zone=${event.zone.padEnd(12)}  [${event.participants.join(', ')}]  session=${event.sessionId}`;
+    case 'object_used':
+      return `t=${t}  tick=${tick}  object_used  ${event.agentId.padEnd(16)}  ${event.affordance.padEnd(8)}  ${event.label}  zone=${event.zone ?? '—'}`;
   }
 }
 

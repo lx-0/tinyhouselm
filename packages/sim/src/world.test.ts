@@ -63,4 +63,22 @@ describe('World', () => {
     expect(a.state.gotoLabel).toBe('park');
     expect(a.state.currentAction).toContain('park');
   });
+
+  it('addObject and restoreObjects roundtrip the affordance field (TINA-416)', () => {
+    const world = new World({ width: 8, height: 8 });
+    const stored = world.addObject({
+      id: 'b1',
+      label: 'park bench',
+      pos: { x: 1, y: 1 },
+      zone: null,
+      droppedAtSim: 10,
+      affordance: 'bench',
+    });
+    expect(stored.affordance).toBe('bench');
+    expect(world.listObjects()[0]!.affordance).toBe('bench');
+
+    const fresh = new World({ width: 8, height: 8 });
+    fresh.restoreObjects(world.listObjects());
+    expect(fresh.getObject('b1')?.affordance).toBe('bench');
+  });
 });

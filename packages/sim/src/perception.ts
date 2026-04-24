@@ -1,4 +1,12 @@
-import type { AgentAction, AgentSnap, Location, SimTime, Vec2, Zone } from '@tina/shared';
+import type {
+  AgentAction,
+  AgentSnap,
+  Location,
+  SimTime,
+  Vec2,
+  WorldObject,
+  Zone,
+} from '@tina/shared';
 import type { Agent } from './agent.js';
 import type { MemoryFact } from './memory.js';
 
@@ -18,6 +26,7 @@ export type ObservedEventKind =
   | 'world_event'
   | 'object_drop'
   | 'object_remove'
+  | 'object_use'
   | 'relationship_nudge';
 
 export interface ObservedEvent {
@@ -48,6 +57,13 @@ export interface Perception {
    * softly bias leisure-hour zone picks toward high-affinity friends.
    */
   zoneAffinityHints?: Map<string, number> | null;
+  /**
+   * All currently-dropped affordance objects in the world (TINA-416). The
+   * heartbeat policy reads this to deterministically bias named-character
+   * routing toward matching objects (`bench`/`music` for leisure, `food` for
+   * eat blocks). Untyped objects are excluded. Empty array when none exist.
+   */
+  affordanceObjects: WorldObject[];
 }
 
 const DAY_SECONDS = 86400;

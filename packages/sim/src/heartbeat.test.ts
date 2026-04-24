@@ -1,6 +1,6 @@
-import type { AgentSnap, Zone } from '@tina/shared';
+import type { AgentSnap, WorldObject, Zone } from '@tina/shared';
 import { describe, expect, it } from 'vitest';
-import { pickLeisureZone } from './heartbeat.js';
+import { pickAffordanceTarget, pickLeisureZone } from './heartbeat.js';
 import type { Perception } from './perception.js';
 import { seededRng } from './rng.js';
 
@@ -31,6 +31,7 @@ function mkPerception(overrides: Partial<Perception>): Perception {
     zones: [],
     locations: [],
     zoneAffinityHints: null,
+    affordanceObjects: [],
     ...overrides,
   };
 }
@@ -58,7 +59,61 @@ describe('pickLeisureZone', () => {
       expect(n).toBeLessThan(260);
     }
   });
+});
 
+describe('pickAffordanceTarget (TINA-416)', () => {
+  function bench(id: string, x: number, y: number, zone: string | null = null): WorldObject {
+    return { id, label: 'park bench', pos: { x, y }, zone, droppedAtSim: 0, affordance: 'bench' };
+  }
+
+  it('returns null when no objects match', () => {
+    const obj = pickAffordanceTarget(['bench'], mkPerception({ affordanceObjects: [] }));
+    expect(obj).toBeNull();
+  });
+
+  it('ignores objects with the wrong affordance type', () => {
+    const food: WorldObject = {
+      id: 'f',
+      label: 'pie',
+      pos: { x: 1, y: 1 },
+      zone: null,
+      droppedAtSim: 0,
+      affordance: 'food',
+    };
+    const obj = pickAffordanceTarget(['bench'], mkPerception({ affordanceObjects: [food] }));
+    expect(obj).toBeNull();
+  });
+
+  it('picks the closest matching object by chebyshev distance', () => {
+    const a = bench('a', 10, 10);
+    const b = bench('b', 2, 2);
+    const c = bench('c', 5, 5);
+    const obj = pickAffordanceTarget(['bench'], mkPerception({ affordanceObjects: [a, b, c] }));
+    expect(obj?.id).toBe('b');
+  });
+
+  it('breaks ties on chebyshev distance with the lower id (deterministic)', () => {
+    // Two benches equidistant from the origin (cheby = 3); deterministic id order wins.
+    const a = bench('z-late', 3, 0);
+    const b = bench('a-early', 0, 3);
+    const obj = pickAffordanceTarget(['bench'], mkPerception({ affordanceObjects: [a, b] }));
+    expect(obj?.id).toBe('a-early');
+  });
+
+  it('respects the zoneFilter when set (acceptance: bench in Kitchen pulls leisure routing)', () => {
+    const inKitchen = bench('k', 4, 4, 'kitchen');
+    const inPark = bench('p', 1, 1, 'park');
+    // Filter to "kitchen" — even though `park` is closer, only the kitchen bench is eligible.
+    const obj = pickAffordanceTarget(
+      ['bench'],
+      mkPerception({ affordanceObjects: [inKitchen, inPark] }),
+      'kitchen',
+    );
+    expect(obj?.id).toBe('k');
+  });
+});
+
+describe('pickLeisureZone bias', () => {
   it('biases toward zones where high-affinity friends are', () => {
     const zones = [mkZone('cafe'), mkZone('park'), mkZone('work')];
     const hints = new Map<string, number>([

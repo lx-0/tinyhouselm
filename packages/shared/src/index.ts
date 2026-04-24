@@ -180,12 +180,27 @@ export type TileMap = {
   areas: Zone[];
 };
 
+/**
+ * Typed affordances for dropped objects (TINA-416). When set, named-character
+ * heartbeat policy biases routing toward matching objects:
+ *   - `bench`  → rest / leisure wander / socialize hooks
+ *   - `music`  → leisure wander / socialize hooks
+ *   - `food`   → eat blocks
+ *
+ * Untyped objects (`affordance` undefined or null) keep TINA-17 semantics:
+ * a perception event fires on drop, but agents do not deterministically route
+ * to them.
+ */
+export type ObjectAffordance = 'bench' | 'music' | 'food';
+
 export type WorldObject = {
   id: string;
   label: string;
   pos: Vec2;
   zone: string | null;
   droppedAtSim: SimTime;
+  /** Optional typed affordance (TINA-416). Absent on legacy/untyped drops. */
+  affordance?: ObjectAffordance | null;
 };
 
 export type InterventionKind =
@@ -193,6 +208,7 @@ export type InterventionKind =
   | 'world_event'
   | 'object_drop'
   | 'object_remove'
+  | 'object_use'
   | 'relationship_nudge';
 
 export type ConversationTurn = {

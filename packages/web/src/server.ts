@@ -560,6 +560,20 @@ async function main(): Promise<void> {
         });
         return;
       }
+      case 'object_used': {
+        // TINA-416: a named character reached a typed affordance object.
+        // Bump the daily counter; the runtime already broadcasts a Delta on
+        // the world emit channel for /admin and /index live displays, so
+        // we only need to record + log here.
+        stickyMetrics?.recordAffordanceUse();
+        log.info('sim.object_used', {
+          agentId: event.agentId,
+          objectId: event.objectId,
+          affordance: event.affordance,
+          zone: event.zone,
+        });
+        return;
+      }
       case 'group_moment': {
         // TINA-345: mint a group-variant moment record + bump the sticky-metrics
         // counter. The runtime already pushes a Delta through the world emit,

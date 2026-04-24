@@ -729,6 +729,7 @@ const eventSendBtn = document.getElementById('event-send') as HTMLButtonElement;
 const eventStatusEl = document.getElementById('event-status') as HTMLElement;
 const objectLabelEl = document.getElementById('object-label') as HTMLInputElement;
 const objectZoneSel = document.getElementById('object-zone') as HTMLSelectElement;
+const objectAffordanceSel = document.getElementById('object-affordance') as HTMLSelectElement;
 const objectDropBtn = document.getElementById('object-drop') as HTMLButtonElement;
 const objectStatusEl = document.getElementById('object-status') as HTMLElement;
 const objectListEl = document.getElementById('object-list') as HTMLElement;
@@ -802,7 +803,8 @@ function renderObjectList(): void {
     row.className = 'obj';
     const label = document.createElement('span');
     const zone = o.zone ? ` · ${o.zone}` : '';
-    label.textContent = `${o.label}${zone}`;
+    const affordance = o.affordance ? ` · ${affordanceGlyph(o.affordance)}${o.affordance}` : '';
+    label.textContent = `${o.label}${zone}${affordance}`;
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.textContent = 'remove';
@@ -887,6 +889,19 @@ eventSendBtn.addEventListener('click', () => {
   });
 });
 
+function affordanceGlyph(a: string): string {
+  switch (a) {
+    case 'bench':
+      return '🪑 ';
+    case 'music':
+      return '🎵 ';
+    case 'food':
+      return '🍞 ';
+    default:
+      return '';
+  }
+}
+
 objectDropBtn.addEventListener('click', () => {
   const label = objectLabelEl.value.trim();
   if (!label) {
@@ -895,9 +910,10 @@ objectDropBtn.addEventListener('click', () => {
     return;
   }
   const zone = objectZoneSel.value || undefined;
+  const affordance = objectAffordanceSel.value || undefined;
   void submitIntervention(
     'object',
-    { op: 'drop', label, zone },
+    { op: 'drop', label, zone, affordance },
     objectStatusEl,
     objectDropBtn,
   ).then((ok) => {
@@ -1004,6 +1020,7 @@ interface StickyDailyRollup {
   returningVisits7d: number;
   nudgesApplied?: number;
   groupMomentsCreated?: number;
+  affordanceUses?: number;
 }
 
 interface StickyMetricsPayload {
@@ -1032,7 +1049,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
   table.className = 'sticky-table';
   const thead = document.createElement('thead');
   thead.innerHTML =
-    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th></tr>';
+    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th></tr>';
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const d of rows) {
@@ -1040,6 +1057,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
     if (d.date === today) tr.className = 'today';
     const nudges = d.nudgesApplied ?? 0;
     const groupMoments = d.groupMomentsCreated ?? 0;
+    const affordances = d.affordanceUses ?? 0;
     const cells: Array<[string, boolean]> = [
       [d.date.slice(5), false],
       [String(d.sharesCreated), d.sharesCreated === 0],
@@ -1048,6 +1066,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
       [String(d.returningVisits7d), d.returningVisits7d === 0],
       [String(nudges), nudges === 0],
       [String(groupMoments), groupMoments === 0],
+      [String(affordances), affordances === 0],
     ];
     for (const [text, isZero] of cells) {
       const td = document.createElement('td');

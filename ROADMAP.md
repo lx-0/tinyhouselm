@@ -46,14 +46,11 @@ Goal: when something memorable happens, a visitor can grab a link that captures 
 - `TINA-207` — **Named-character relationship arcs. ✅** _(shipped 2026-04-24.)_ Affinity updates on named×named closes, weekly deterministic rollover inside `tickOnce`, 5×5 admin grid, `/moment/:id` surfaces current arc label at render time. Leisure wander zones biased by `Perception.zoneAffinityHints`.
 - `TINA-275` — **Arc-driven interventions. ✅** _(shipped 2026-04-24.)_ New `relationship_nudge` intervention (spark / tension / reconcile), persisted one-shot queue in `RelationshipStore`, consumed on next named×named close, both participants receive a deterministic perception event, `/admin` 5×5 pair picker + three-way radio, `/moment/:id` "viewer-nudged" pill at render time, new `nudges_applied` counter in the sticky-metrics rollup.
 - `TINA-345` — **Multi-character group moments. ✅** _(shipped 2026-04-24.)_ Detector inside `tickOnce` watches for ≥3 named agents standing in the same zone for N consecutive ticks (env-tunable, default 3). Fires a `group_moment` runtime event → captured as a new `group`-variant `MomentRecord` with deterministic "A, B, and C met at {Zone}" headline, empty transcript, dedup by (zone, participant-set, sim-day). `/moment/:id` renders the group variant with a badge + pairwise arc labels. `/admin` conversation feed gets a distinct `group` row. New `group_moments_created` counter in the sticky-metrics rollup. No LLM on hot path; tracker state + dedup map are LRU-bounded.
+- `TINA-416` — **Zone affordance interventions. ✅** _(shipped 2026-04-24.)_ `/admin` drop-object form gains a type selector (`bench` / `music` / `food`); typed objects render with per-affordance glyph + halo and persist across snapshot/restore. Named-character heartbeat policy deterministically routes toward matching affordances during leisure / eat / rest blocks via a new `pickAffordanceTarget` helper. Arrival fires a runtime `object_used` event with cooldown-gated dedup, an `intervention type=object_use` Delta, and bumps a new `affordanceUses` sticky-metrics counter (surfaced as the `aff` column in the /admin sticky panel). No LLM on hot path; routing is a deterministic chebyshev-distance pick with id-tiebreak.
 
-### Next unblocked (pick after v0.5 #6)
+### Next unblocked (pick after v0.5 #7)
 
 Depth over breadth until TINA-145 has 7 clean days. "Second authored town" is deferred until **2026-04-30** — only pick it if the first town's return-rate holds up. If it's weak, keep compounding depth on the features above.
-
-Candidates (pick one at a time):
-
-- **Zone affordance interventions.** Drop-object (TINA-17) already perception-streams; extend with typed affordances (benches, music, food) that named characters actually route to, amplifying per-zone behavior.
 
 ## Non-goals (explicit)
 

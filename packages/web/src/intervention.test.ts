@@ -1,6 +1,13 @@
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Delta, InterventionKind, SimTime, Vec2, WorldObject } from '@tina/shared';
+import type {
+  Delta,
+  InterventionKind,
+  ObjectAffordance,
+  SimTime,
+  Vec2,
+  WorldObject,
+} from '@tina/shared';
 import { describe, expect, it } from 'vitest';
 import { InterventionHandlers } from './intervention.js';
 
@@ -63,7 +70,13 @@ function fakeRes(): ServerResponse & FakeResp {
 interface FakeRuntimeCalls {
   whisper: Array<{ agentId: string; text: string }>;
   event: Array<{ text: string; zone?: string | null; agentIds?: string[] }>;
-  drop: Array<{ label: string; zone?: string | null; pos?: Vec2; id?: string }>;
+  drop: Array<{
+    label: string;
+    zone?: string | null;
+    pos?: Vec2;
+    id?: string;
+    affordance?: ObjectAffordance | null;
+  }>;
   remove: Array<{ id: string }>;
   nudge: Array<{ a: string; b: string; direction: 'spark' | 'tension' | 'reconcile' }>;
 }
@@ -87,6 +100,7 @@ function fakeRuntime(
       zone?: string | null;
       pos?: Vec2;
       id?: string;
+      affordance?: ObjectAffordance | null;
     }) => {
       calls.drop.push(input);
       const object: WorldObject = overrides?.drop ?? {
@@ -95,6 +109,7 @@ function fakeRuntime(
         pos: input.pos ?? { x: 0, y: 0 },
         zone: input.zone ?? null,
         droppedAtSim: simTime,
+        affordance: input.affordance ?? null,
       };
       return { simTime, affected: ['a'], summary: `dropped ${input.label}`, object };
     },
@@ -270,6 +285,31 @@ describe('InterventionHandlers.tryHandle', () => {
       type: 'world_event',
       zone: 'cafe',
     });
+  });
+
+  it('object drop forwards affordance + rejects unknown values (TINA-416)', async () => {
+    const { handlers, calls, broadcasts } = makeHandlers('secret');
+    const okReq = fakeReq({
+      method: 'POST',
+      headers: { 'x-admin-token': 'secret' },
+      body: { op: 'drop', label: 'park bench', zone: 'park', affordance: 'bench' },
+    });
+    const okRes = fakeRes();
+    await handlers.tryHandle(okReq, okRes, '/api/admin/intervention/object');
+    expect(okRes.statusCode).toBe(200);
+    expect(calls.drop[0]).toMatchObject({ label: 'park bench', affordance: 'bench' });
+    expect(broadcasts[0]).toMatchObject({ kind: 'intervention', type: 'object_drop' });
+
+    const badReq = fakeReq({
+      method: 'POST',
+      headers: { 'x-admin-token': 'secret' },
+      body: { op: 'drop', label: 'mystery', affordance: 'gizmo' },
+    });
+    const badRes = fakeRes();
+    await handlers.tryHandle(badReq, badRes, '/api/admin/intervention/object');
+    expect(badRes.statusCode).toBe(400);
+    // Bogus drop must not have been forwarded to the runtime.
+    expect(calls.drop).toHaveLength(1);
   });
 
   it('object drop and remove dispatch correctly', async () => {

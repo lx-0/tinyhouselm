@@ -169,6 +169,162 @@ describe('Runtime interventions', () => {
     expect(() => runtime.injectWhisper({ agentId: 'ghost', text: 'hi' })).toThrow();
   });
 
+  it('dropObject persists the affordance type and broadcasts it (TINA-416)', async () => {
+    const { runtime } = await makeRuntime({
+      personas: [{ id: 'witness', position: { x: 4, y: 4 } }],
+    });
+    await runtime.runTicks(1);
+    const drop = runtime.dropObject({
+      label: 'park bench',
+      pos: { x: 5, y: 5 },
+      affordance: 'bench',
+    });
+    expect(drop.object.affordance).toBe('bench');
+    expect(runtime.world.getObject(drop.object.id)?.affordance).toBe('bench');
+  });
+
+  it('emits object_used + Delta when an agent reaches a typed affordance, then enforces cooldown (TINA-416)', async () => {
+    const { runtime, events } = await makeRuntime({
+      personas: [{ id: 'sitter', position: { x: 5, y: 5 } }],
+    });
+    runtime.dropObject({
+      id: 'bench-1',
+      label: 'park bench',
+      pos: { x: 5, y: 5 },
+      affordance: 'bench',
+    });
+    runtime.world.drainDeltas();
+
+    await runtime.runTicks(1);
+    const usedEvents = events.filter((e) => e.kind === 'object_used');
+    expect(usedEvents).toHaveLength(1);
+    expect(usedEvents[0]).toMatchObject({
+      kind: 'object_used',
+      agentId: 'sitter',
+      objectId: 'bench-1',
+      affordance: 'bench',
+    });
+    const deltas = runtime.world.drainDeltas();
+    expect(deltas.some((d) => d.kind === 'intervention' && d.type === 'object_use')).toBe(true);
+
+    // Sitter stays in place — cooldown must suppress repeat fires for ~10 ticks.
+    await runtime.runTicks(20);
+    const after = events.filter((e) => e.kind === 'object_used');
+    expect(after).toHaveLength(1);
+  });
+
+  it('does not fire object_used for untyped objects (TINA-416)', async () => {
+    const { runtime, events } = await makeRuntime({
+      personas: [{ id: 'sitter', position: { x: 5, y: 5 } }],
+    });
+    runtime.dropObject({
+      id: 'plain',
+      label: 'old letter',
+      pos: { x: 5, y: 5 },
+    });
+    await runtime.runTicks(3);
+    expect(events.filter((e) => e.kind === 'object_used')).toHaveLength(0);
+  });
+
+  it('removeObject clears the affordance-use cooldown so a replacement counts (TINA-416)', async () => {
+    const { runtime, events } = await makeRuntime({
+      personas: [{ id: 'sitter', position: { x: 5, y: 5 } }],
+    });
+    runtime.dropObject({
+      id: 'bench-1',
+      label: 'park bench',
+      pos: { x: 5, y: 5 },
+      affordance: 'bench',
+    });
+    await runtime.runTicks(1);
+    expect(events.filter((e) => e.kind === 'object_used')).toHaveLength(1);
+    runtime.removeObject({ id: 'bench-1' });
+    runtime.dropObject({
+      id: 'bench-1',
+      label: 'park bench',
+      pos: { x: 5, y: 5 },
+      affordance: 'bench',
+    });
+    await runtime.runTicks(1);
+    expect(events.filter((e) => e.kind === 'object_used')).toHaveLength(2);
+  });
+
+  it('a named agent on a leisure block routes to a dropped bench in another zone (TINA-416 acceptance)', async () => {
+    // Hand-rolled runtime: one named character with an authored leisure block
+    // that has no preferred zone (leisure wander). We drop a bench in a zone
+    // far from the agent's start. The default policy + new affordance routing
+    // should commit the agent's goto target to the bench tile.
+    const events: RuntimeEvent[] = [];
+    const root = await mkdtemp(join(tmpdir(), 'tina-aff-route-'));
+    const clock = new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 });
+    const world = new World({
+      width: 16,
+      height: 16,
+      clock,
+      zones: [
+        { name: 'home', x: 0, y: 0, width: 4, height: 4 },
+        { name: 'kitchen', x: 10, y: 10, width: 4, height: 4 },
+      ],
+    });
+    const hourSchedule = new Map<
+      number,
+      { hour: number; zone: 'cafe' | 'park' | 'work' | 'home' | null; intent: string }
+    >();
+    for (let h = 0; h < 24; h++) {
+      // Free leisure all day → planZoneTarget is exclusively driven by typed
+      // affordances when one exists.
+      hourSchedule.set(h, { hour: h, zone: null, intent: 'free time' });
+    }
+    const namedSkill = parseSkillSource(
+      '---\nname: mei\ndescription: curious, restless\nmetadata:\n  named: true\n---\n\n# mei\n',
+      '/virtual/mei/SKILL.md',
+    );
+    const runtime = new Runtime({
+      agents: [
+        {
+          skill: namedSkill,
+          memory: new ParaMemory({
+            root,
+            now: () => new Date('2026-04-23T00:00:00Z'),
+          }),
+          initial: { position: { x: 1, y: 1 } },
+          hourSchedule,
+        },
+      ],
+      world,
+      seed: 7,
+      tickMs: 100,
+      reflections: false,
+      memoryFlushEveryTicks: 0,
+      onEvent: (e: RuntimeEvent) => events.push(e),
+    });
+    // Move sim-time into a leisure hour, then drop the bench in Kitchen and
+    // tick. Within a handful of ticks the heartbeat must commit a goto whose
+    // target is the bench tile.
+    clock.restore({ simTime: 14 * 3600, ticks: clock.ticks, speed: clock.speed });
+    runtime.dropObject({
+      id: 'bench-kitchen',
+      label: 'park bench',
+      pos: { x: 11, y: 11 },
+      affordance: 'bench',
+    });
+
+    let routed = false;
+    for (let i = 0; i < 60; i++) {
+      await runtime.runTicks(1);
+      const agent = runtime.listAgents()[0]!;
+      if (agent.state.gotoTarget?.x === 11 && agent.state.gotoTarget?.y === 11) {
+        routed = true;
+        break;
+      }
+      if (agent.state.position.x === 11 && agent.state.position.y === 11) {
+        routed = true;
+        break;
+      }
+    }
+    expect(routed).toBe(true);
+  });
+
   it('end-to-end: whisper drives a replan + memory fact within runTicks(3)', async () => {
     const { runtime, events } = await makeRuntime({
       personas: [{ id: 'target', position: { x: 3, y: 3 } }],

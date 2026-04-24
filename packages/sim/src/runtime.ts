@@ -4,6 +4,7 @@ import {
   type ConversationTurn,
   type Delta,
   type InterventionKind,
+  type ObjectAffordance,
   type PlanContext,
   type SimTime,
   type Vec2,
@@ -38,6 +39,14 @@ import type { NudgeDirection, PairNudge, RelationshipStore } from './relationshi
 import type { SkillDocument } from './skills.js';
 import { TelemetryCollector, type TelemetrySnapshot } from './telemetry.js';
 import { World } from './world.js';
+
+/**
+ * Per-(agent, object) cooldown for affordance-use events (TINA-416). Stops a
+ * stationary agent on a bench from bumping the counter every tick. Tuned so a
+ * named character that lingers on the bench through a leisure block fires at
+ * most a couple of times per real-time minute at SIM_SPEED=30.
+ */
+export const AFFORDANCE_USE_COOLDOWN_SIM: SimTime = 600;
 
 export interface RuntimeAgent {
   skill: SkillDocument;
@@ -218,6 +227,24 @@ export type RuntimeEvent =
       sessionId: string;
       zone: string;
       participants: string[];
+    }
+  /**
+   * Emitted when an agent reaches a typed affordance object (TINA-416). The
+   * web layer subscribes to bump the `affordanceUses` sticky counter and to
+   * broadcast a Delta so /admin can show the use. Cooldown lives in the
+   * runtime — at most one event per (agent, object) per AFFORDANCE_USE_COOLDOWN_SIM
+   * sim-seconds — so a stationary agent doesn't spam the counter.
+   */
+  | {
+      kind: 'object_used';
+      tick: number;
+      simTime: SimTime;
+      agentId: string;
+      agentName: string;
+      objectId: string;
+      label: string;
+      affordance: ObjectAffordance;
+      zone: string | null;
     };
 
 interface Recent {
@@ -258,6 +285,11 @@ export interface InterventionDropObjectInput {
   label: string;
   pos?: Vec2;
   zone?: string | null;
+  /**
+   * Optional typed affordance (TINA-416). When set, named-character heartbeat
+   * routing biases toward this object during matching activity blocks.
+   */
+  affordance?: ObjectAffordance | null;
 }
 
 export interface InterventionRemoveObjectInput {
@@ -340,6 +372,13 @@ export class Runtime {
   private readonly groupMoments: GroupMomentTracker | null;
   /** Monotonic counter for synthetic group-moment session ids. */
   private groupMomentSeq = 0;
+  /**
+   * Per-(agent,object) cooldown for affordance-use events (TINA-416). Prevents
+   * a stationary agent on a bench from firing a use event every tick — once
+   * an `object_used` fires, suppress the same pair for `AFFORDANCE_USE_COOLDOWN_SIM`
+   * sim-seconds. Map key is `${agentId}::${objectId}`.
+   */
+  private readonly affordanceLastUseAt = new Map<string, SimTime>();
   private _tickIndex = 0;
   private flushInFlight: Promise<void> | null = null;
 
@@ -479,6 +518,10 @@ export class Runtime {
 
     for (const agent of this.agents) {
       await this.stepGoto(agent, tick, simTime);
+      // Stationary agents standing on a typed affordance still "use" it once
+      // the cooldown elapses — keeps a long leisure sit on a bench bumping
+      // the counter at a steady cadence rather than only at arrival.
+      if (!agent.state.gotoTarget) this.maybeFireAffordanceUse(agent, tick, simTime);
     }
 
     for (const agent of this.agents) {
@@ -837,12 +880,14 @@ export class Runtime {
       pos = { x: Math.floor(this.world.width / 2), y: Math.floor(this.world.height / 2) };
     }
     const zone = input.zone ?? this.world.zoneAt(pos);
+    const affordance = input.affordance ?? null;
     const object = this.world.addObject({
       id,
       label,
       pos: { ...pos },
       zone,
       droppedAtSim: simTime,
+      affordance,
     });
     const text = zone ? `a ${label} appeared at ${zone}` : `a ${label} appeared`;
     const expireAt = simTime + Math.max(1, (this.speechTtlMs / 1000) * this.clock.speed);
@@ -912,6 +957,11 @@ export class Runtime {
       });
     }
     this.world.removeObject(existing.id);
+    // Drop any cooldown entries for this object so the same id (re-dropped
+    // later) isn't gated by a stale last-use timestamp.
+    for (const key of [...this.affordanceLastUseAt.keys()]) {
+      if (key.endsWith(`::${existing.id}`)) this.affordanceLastUseAt.delete(key);
+    }
     this.emit({
       kind: 'intervention',
       tick,
@@ -1094,6 +1144,80 @@ export class Runtime {
       agent.state.path = [];
       agent.state.pathPlannedAtTick = -1;
       agent.state.currentAction = label ? `arrived at ${label}` : 'idle';
+    }
+  }
+
+  /**
+   * Detect that the agent is sitting on a typed affordance object (TINA-416)
+   * and emit a one-shot `object_used` event + perception notification + Delta.
+   *
+   * Called from `stepGoto` whenever the agent reaches its target tile and
+   * also from `tickOnce` for each non-moving agent so that an agent placed at
+   * an affordance via snapshot or ambient wander still registers a use.
+   * Cooldown lives in `affordanceLastUseAt` to keep stationary agents from
+   * spamming the counter.
+   */
+  private maybeFireAffordanceUse(agent: Agent, tick: number, simTime: SimTime): void {
+    const pos = agent.state.position;
+    const objects = this.world.listObjects();
+    for (const obj of objects) {
+      if (!obj.affordance) continue;
+      if (obj.pos.x !== pos.x || obj.pos.y !== pos.y) continue;
+      const key = `${agent.def.id}::${obj.id}`;
+      const last = this.affordanceLastUseAt.get(key);
+      if (last != null && simTime - last < AFFORDANCE_USE_COOLDOWN_SIM) continue;
+      this.affordanceLastUseAt.set(key, simTime);
+
+      const zone = obj.zone ?? this.world.zoneAt(pos);
+      const where = zone ? `at ${zone}` : 'in the open';
+      const text = `${agent.def.name} used the ${obj.label} ${where}`;
+      const expireAt = simTime + Math.max(1, (this.speechTtlMs / 1000) * this.clock.speed);
+      const observers: string[] = [];
+      for (const other of this.agents) {
+        if (other.def.id === agent.def.id) continue;
+        const inZone = zone && this.world.zoneAt(other.state.position) === zone;
+        const nearby = chebyshevDistance(other.state.position, obj.pos) <= this.perceptionRadius;
+        if (!inZone && !nearby) continue;
+        observers.push(other.def.id);
+        this.pendingObservations.push({
+          targetId: other.def.id,
+          observed: { kind: 'object_use', source: 'intervention', text, zone, at: simTime },
+          expireAt,
+        });
+      }
+      this.emit({
+        kind: 'object_used',
+        tick,
+        simTime,
+        agentId: agent.def.id,
+        agentName: agent.def.name,
+        objectId: obj.id,
+        label: obj.label,
+        affordance: obj.affordance,
+        zone,
+      });
+      // Surface to SSE clients via the existing intervention Delta channel —
+      // this lets /admin observers see the use happen in the live stream.
+      this.world.emit({
+        kind: 'intervention',
+        type: 'object_use',
+        summary: text,
+        target: agent.def.id,
+        zone,
+        affected: observers,
+        simTime,
+      });
+    }
+
+    if (this.affordanceLastUseAt.size > 4096) {
+      // Bounded LRU-ish guard: drop oldest entries when the map gets large.
+      // Cooldown windows are short so stale entries are safe to evict.
+      const drop = this.affordanceLastUseAt.size - 4096;
+      let i = 0;
+      for (const k of this.affordanceLastUseAt.keys()) {
+        if (i++ >= drop) break;
+        this.affordanceLastUseAt.delete(k);
+      }
     }
   }
 
@@ -1459,6 +1583,10 @@ export class Runtime {
         if (hints.size > 0) zoneAffinityHints = hints;
       }
     }
+    // All currently-dropped typed affordances (TINA-416). Surfaced to the
+    // heartbeat for deterministic routing bias. Cheap to copy — the active
+    // set is bounded by viewer drop cadence and `removeObject` deletes them.
+    const affordanceObjects = this.world.listObjects().filter((o) => o.affordance != null);
     return {
       tick,
       simTime: this.world.simTime,
@@ -1472,6 +1600,7 @@ export class Runtime {
       zones: [...this.world.zones],
       locations: this.world.locations,
       zoneAffinityHints,
+      affordanceObjects,
     };
   }
 

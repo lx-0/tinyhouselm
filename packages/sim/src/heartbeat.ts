@@ -1,4 +1,4 @@
-import type { Affordance, AgentAction, Vec2 } from '@tina/shared';
+import type { Affordance, AgentAction, ObjectAffordance, Vec2, WorldObject } from '@tina/shared';
 import type { ParaMemory } from './memory.js';
 import type { Perception } from './perception.js';
 import type { DayPlan, PlanActivity, PlanBlock } from './plan.js';
@@ -97,12 +97,22 @@ export class DefaultHeartbeatPolicy implements HeartbeatPolicy {
 
     if (block && !hasGoto) {
       const zoneTarget = planZoneTarget(block, perception);
-      if (zoneTarget && perception.self.zone !== block.preferredZone) {
-        actions.push({ kind: 'goto', target: zoneTarget.target, label: zoneTarget.label });
-        if (perception.tick === 0) {
-          actions.push({ kind: 'remember', fact: `committed: ${block.intent}` });
+      if (zoneTarget) {
+        const here = perception.self.position;
+        const atTarget = here.x === zoneTarget.target.x && here.y === zoneTarget.target.y;
+        const wrongZone =
+          block.preferredZone !== null && perception.self.zone !== block.preferredZone;
+        // Route if the agent isn't already standing on the chosen tile, or if
+        // the plan has a preferred zone the agent hasn't reached yet. Free-zone
+        // affordance pulls (block.preferredZone === null, TINA-416) only need
+        // the position check — they don't care about zone membership.
+        if (!atTarget && (wrongZone || block.preferredZone === null)) {
+          actions.push({ kind: 'goto', target: zoneTarget.target, label: zoneTarget.label });
+          if (perception.tick === 0) {
+            actions.push({ kind: 'remember', fact: `committed: ${block.intent}` });
+          }
+          return actions;
         }
-        return actions;
       }
     }
 
@@ -133,11 +143,19 @@ export class DefaultHeartbeatPolicy implements HeartbeatPolicy {
 
     if (!hasGoto && !block && perception.nearby.length === 0 && perception.zones.length > 0) {
       if (rng() < hints.restlessness * 0.5) {
-        const zone = pickLeisureZone(rng, perception);
-        if (zone) {
-          const cx = Math.floor(zone.x + zone.width / 2);
-          const cy = Math.floor(zone.y + zone.height / 2);
-          actions.push({ kind: 'goto', target: { x: cx, y: cy }, label: zone.name });
+        // Leisure-affordance pull (TINA-416): if a viewer dropped a bench/music
+        // somewhere the agent can see, route there instead of to a random
+        // zone center. Untyped objects + work-only affordances are skipped.
+        const aff = pickAffordanceTarget(['bench', 'music'], perception);
+        if (aff) {
+          actions.push({ kind: 'goto', target: { ...aff.pos }, label: aff.label });
+        } else {
+          const zone = pickLeisureZone(rng, perception);
+          if (zone) {
+            const cx = Math.floor(zone.x + zone.width / 2);
+            const cy = Math.floor(zone.y + zone.height / 2);
+            actions.push({ kind: 'goto', target: { x: cx, y: cy }, label: zone.name });
+          }
         }
       }
     }
@@ -266,11 +284,80 @@ function affordanceForActivity(activity: PlanActivity): Affordance | null {
   }
 }
 
+/**
+ * Object-affordance preferences per plan activity (TINA-416). Distinct from
+ * the static `Affordance` map above (which keys location anchors): these
+ * names track typed dropped objects via `WorldObject.affordance`.
+ *
+ * `socialize` and `wander` overlap on bench/music — those are the leisure
+ * hooks viewers will most often drop. `rest` favors a bench. `eat` only
+ * matches `food`. `work` deliberately has none — work blocks should still
+ * route to the desk anchor, not be hijacked by a viewer dropping a bench
+ * in the office.
+ */
+export const OBJECT_AFFORDANCES_FOR_ACTIVITY: Readonly<
+  Record<PlanActivity, readonly ObjectAffordance[]>
+> = {
+  work: [],
+  eat: ['food'],
+  rest: ['bench'],
+  socialize: ['bench', 'music'],
+  wander: ['bench', 'music'],
+};
+
+/**
+ * Pick the closest dropped affordance object whose type matches one of
+ * `wanted`. Deterministic: ties on chebyshev distance broken by lexicographic
+ * id so two replays of the same tick produce the same target. Returns `null`
+ * when no matching affordance is in the perception set.
+ *
+ * Pass `zoneFilter` to require the object live inside a specific zone (useful
+ * when the plan block has a preferred zone). Omit it for free-roam leisure.
+ */
+export function pickAffordanceTarget(
+  wanted: readonly ObjectAffordance[],
+  perception: Perception,
+  zoneFilter?: string | null,
+): WorldObject | null {
+  if (wanted.length === 0) return null;
+  if (perception.affordanceObjects.length === 0) return null;
+  const self = perception.self.position;
+  let best: WorldObject | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const obj of perception.affordanceObjects) {
+    if (!obj.affordance || !wanted.includes(obj.affordance)) continue;
+    if (zoneFilter !== undefined && obj.zone !== zoneFilter) continue;
+    const dx = Math.abs(obj.pos.x - self.x);
+    const dy = Math.abs(obj.pos.y - self.y);
+    const d = dx > dy ? dx : dy;
+    if (d < bestDist) {
+      best = obj;
+      bestDist = d;
+    } else if (d === bestDist && best && obj.id < best.id) {
+      best = obj;
+    }
+  }
+  return best;
+}
+
 function planZoneTarget(
   block: PlanBlock,
   perception: Perception,
 ): { target: Vec2; label: string } | null {
-  if (!block.preferredZone) return null;
+  const wantedObjects = OBJECT_AFFORDANCES_FOR_ACTIVITY[block.activity];
+  if (!block.preferredZone) {
+    // No fixed zone — let a typed dropped affordance pull the agent (TINA-416).
+    // This is the leisure / free-wander entry point that lets viewers drop a
+    // bench in Kitchen and have a named character actually route there.
+    const obj = pickAffordanceTarget(wantedObjects, perception);
+    if (obj) return { target: { ...obj.pos }, label: obj.label };
+    return null;
+  }
+  // Preferred zone is set: a matching dropped affordance inside that zone
+  // wins over the location anchor. Falls through to the existing
+  // location-anchor / zone-center path when nothing matches.
+  const obj = pickAffordanceTarget(wantedObjects, perception, block.preferredZone);
+  if (obj) return { target: { ...obj.pos }, label: obj.label };
   // Prefer a location in the area whose affordance matches the activity.
   const wantAff = affordanceForActivity(block.activity);
   const inArea = perception.locations.filter((l) => l.area === block.preferredZone);
