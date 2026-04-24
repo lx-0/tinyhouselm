@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
-import { RelationshipStore } from '@tina/sim';
 import { type MomentRecord, deriveWorldClock } from '@tina/shared';
+import { RelationshipStore } from '@tina/sim';
 import { describe, expect, test } from 'vitest';
 import { MomentRoutes } from './moment-routes.js';
 import { MomentStore } from './moments.js';

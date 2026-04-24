@@ -23,7 +23,6 @@ import { DefaultHeartbeatPolicy, makeRngForAgent } from './heartbeat.js';
 import type { MemoryFact, ParaMemory } from './memory.js';
 import type { ScheduleEntry } from './named-personas.js';
 import { findPath } from './path.js';
-import type { RelationshipStore } from './relationships.js';
 import {
   type HeardSpeech,
   type ObservedEvent,
@@ -34,6 +33,7 @@ import {
 } from './perception.js';
 import { type DayPlan, PlanRuntime, activeBlock, simHour } from './plan.js';
 import { ReflectionEngine, type ReflectionEngineOptions } from './reflection.js';
+import type { RelationshipStore } from './relationships.js';
 import type { SkillDocument } from './skills.js';
 import { TelemetryCollector, type TelemetrySnapshot } from './telemetry.js';
 import { World } from './world.js';

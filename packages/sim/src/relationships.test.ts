@@ -89,9 +89,7 @@ describe('deriveArcLabel', () => {
   it('never returns new — that label is only set on pair creation', () => {
     // A freshly-rolled pair with a single lifetime conversation and no
     // contact this window should read as cooling, not new.
-    expect(
-      state({ sharedConversationCount: 1, windowConversationCount: 0 }),
-    ).toBe('cooling');
+    expect(state({ sharedConversationCount: 1, windowConversationCount: 0 })).toBe('cooling');
   });
 
   it('estranged when affinity has fallen below -0.3', () => {
@@ -107,9 +105,7 @@ describe('deriveArcLabel', () => {
   });
 
   it('warming when the window delta crossed the threshold', () => {
-    expect(
-      state({ windowAffinityDelta: 0.12, windowConversationCount: 2 }),
-    ).toBe('warming');
+    expect(state({ windowAffinityDelta: 0.12, windowConversationCount: 2 })).toBe('warming');
   });
 
   it('steady otherwise', () => {

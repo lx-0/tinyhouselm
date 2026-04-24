@@ -262,9 +262,7 @@ export class RelationshipStore {
     const delta = computeAffinityDelta({
       turnCount: input.turnCount,
       sharedConversationCount: existing?.sharedConversationCount ?? 0,
-      simTimeSinceLastInteraction: existing
-        ? input.simTime - existing.lastInteractionSim
-        : null,
+      simTimeSinceLastInteraction: existing ? input.simTime - existing.lastInteractionSim : null,
     });
 
     let state: PairState;

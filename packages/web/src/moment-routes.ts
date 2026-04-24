@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { ArcLabel, RelationshipStore } from '@tina/sim';
 import type { MomentRecord } from '@tina/shared';
+import type { ArcLabel, RelationshipStore } from '@tina/sim';
 import type { MomentStore } from './moments.js';
 
 export interface MomentRouteOptions {
