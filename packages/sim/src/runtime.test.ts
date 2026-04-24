@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { SimulationClock } from './clock.js';
 import type { HeartbeatPolicy } from './heartbeat.js';
 import { ParaMemory } from './memory.js';
+import { RelationshipStore } from './relationships.js';
 import { Runtime, type RuntimeEvent } from './runtime.js';
 import { type SkillDocument, parseSkillSource } from './skills.js';
 import { blankMap, setTile } from './tilemap.js';
@@ -624,5 +625,112 @@ describe('Runtime', () => {
     for (const p of trace) {
       if (p.x === 2) expect(p.y).toBe(2);
     }
+  });
+
+  it('records a relationship pair when two named agents close a conversation (TINA-207)', async () => {
+    // Two named agents adjacent, aggressive close cap so one sim-min of
+    // chatter triggers an aged close. We check that after the close the
+    // pair state exists with a positive affinity and a sharedCount of 1.
+    const namedSkill = (name: string): SkillDocument =>
+      parseSkillSource(
+        `---\nname: ${name}\ndescription: chatty social\nmetadata:\n  named: true\n---\n\n# ${name}\n`,
+        `/virtual/${name}/SKILL.md`,
+      );
+    const rootA = await mkdtemp(join(tmpdir(), 'tina-rel-runtime-a-'));
+    const rootB = await mkdtemp(join(tmpdir(), 'tina-rel-runtime-b-'));
+    const world = new World({
+      width: 12,
+      height: 12,
+      clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
+    });
+    const speakingPolicy: HeartbeatPolicy = {
+      async decide() {
+        return [{ kind: 'speak', to: null, text: 'hey' }] satisfies AgentAction[];
+      },
+    };
+    const relationships = new RelationshipStore();
+    const runtime = new Runtime({
+      world,
+      policy: speakingPolicy,
+      seed: 11,
+      tickMs: 100,
+      speechRadius: 16,
+      conversationIdleMs: 600_000,
+      conversationMaxAgeMs: 10,
+      conversationMaxAgeJitter: 0,
+      memoryFlushEveryTicks: 0,
+      reflections: false,
+      recallLimit: 0,
+      relationships,
+      agents: [
+        {
+          skill: namedSkill('mei'),
+          memory: new ParaMemory({ root: rootA, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 4, y: 4 } },
+        },
+        {
+          skill: namedSkill('bruno'),
+          memory: new ParaMemory({ root: rootB, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 5, y: 4 } },
+        },
+      ],
+    });
+    await runtime.runTicks(5);
+    await runtime.awaitConversationPersists();
+    const pair = relationships.getPair('mei', 'bruno');
+    expect(pair).not.toBeNull();
+    expect(pair!.sharedConversationCount).toBeGreaterThanOrEqual(1);
+    expect(pair!.affinity).toBeGreaterThan(0);
+    expect(pair!.arcLabel).toBe('new');
+  });
+
+  it('does not create a pair when one participant is procedural (TINA-207)', async () => {
+    const namedSkill = (name: string, named: boolean): SkillDocument =>
+      parseSkillSource(
+        `---\nname: ${name}\ndescription: chatty social${named ? '\nmetadata:\n  named: true' : ''}\n---\n\n# ${name}\n`,
+        `/virtual/${name}/SKILL.md`,
+      );
+    const rootA = await mkdtemp(join(tmpdir(), 'tina-rel-proc-a-'));
+    const rootB = await mkdtemp(join(tmpdir(), 'tina-rel-proc-b-'));
+    const world = new World({
+      width: 12,
+      height: 12,
+      clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
+    });
+    const speakingPolicy: HeartbeatPolicy = {
+      async decide() {
+        return [{ kind: 'speak', to: null, text: 'hey' }] satisfies AgentAction[];
+      },
+    };
+    const relationships = new RelationshipStore();
+    const runtime = new Runtime({
+      world,
+      policy: speakingPolicy,
+      seed: 13,
+      tickMs: 100,
+      speechRadius: 16,
+      conversationIdleMs: 600_000,
+      conversationMaxAgeMs: 10,
+      conversationMaxAgeJitter: 0,
+      memoryFlushEveryTicks: 0,
+      reflections: false,
+      recallLimit: 0,
+      relationships,
+      agents: [
+        {
+          skill: namedSkill('mei', true),
+          memory: new ParaMemory({ root: rootA, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 4, y: 4 } },
+        },
+        {
+          skill: namedSkill('stranger', false),
+          memory: new ParaMemory({ root: rootB, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 5, y: 4 } },
+        },
+      ],
+    });
+    await runtime.runTicks(5);
+    await runtime.awaitConversationPersists();
+    expect(relationships.count()).toBe(0);
   });
 });

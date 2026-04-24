@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { type Delta, type Vec2, deriveWorldClock } from '@tina/shared';
 import {
   ParaMemory,
+  RelationshipStore,
   Runtime,
   type RuntimeEvent,
   SimulationClock,
@@ -79,6 +80,15 @@ const STICKY_METRICS_DIR_ENV = process.env.STICKY_METRICS_DIR ?? './data/sticky-
 const STICKY_METRICS_DIR = isAbsolute(STICKY_METRICS_DIR_ENV)
   ? STICKY_METRICS_DIR_ENV
   : resolve(process.cwd(), STICKY_METRICS_DIR_ENV);
+
+// Named-character relationship arcs (TINA-207).
+const RELATIONSHIPS_ENABLED =
+  (process.env.RELATIONSHIPS_ENABLED ?? 'true').toLowerCase() !== 'false';
+const RELATIONSHIPS_DIR_ENV = process.env.RELATIONSHIPS_DIR ?? './data/relationships';
+const RELATIONSHIPS_DIR = isAbsolute(RELATIONSHIPS_DIR_ENV)
+  ? RELATIONSHIPS_DIR_ENV
+  : resolve(process.cwd(), RELATIONSHIPS_DIR_ENV);
+const RELATIONSHIPS_MAX = Number(process.env.RELATIONSHIPS_MAX ?? 200);
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
@@ -257,12 +267,29 @@ async function main(): Promise<void> {
     windowSize: reflectionTunables.windowSize,
   });
 
+  const relationships = RELATIONSHIPS_ENABLED
+    ? new RelationshipStore({
+        dir: RELATIONSHIPS_DIR,
+        maxPairs: RELATIONSHIPS_MAX,
+        log: (level, event, fields) => log[level](event, fields),
+      })
+    : null;
+  if (relationships) {
+    await relationships.load();
+    log.info('relationships.ready', {
+      dir: RELATIONSHIPS_DIR,
+      max: RELATIONSHIPS_MAX,
+      loaded: relationships.count(),
+    });
+  }
+
   const runtime = new Runtime({
     agents: runtimeAgents,
     world,
     tickMs: TICK_MS,
     seed: SEED,
     reflections: reflectionOpts,
+    relationships,
   });
 
   log.info('web.personas.loaded', { count: skills.length });
@@ -539,6 +566,7 @@ async function main(): Promise<void> {
         store: moments,
         publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
         checkAdmin: (req) => checkAdmin(req, adminToken),
+        relationships,
         onShare: () => {
           budget.record(0, 'admin:moment:share');
           log.info('admin.moment.share', {});
@@ -622,6 +650,30 @@ async function main(): Promise<void> {
       }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, status: snapshotStatus() }));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/admin/relationships') {
+      if (!relationships) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'relationships disabled' }));
+        return;
+      }
+      const namedList = [...agentMeta.entries()]
+        .filter(([, m]) => m.named)
+        .map(([id, m]) => ({ id, name: m.name, color: m.color }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+      const pairs = relationships.list().map((p) => ({
+        a: p.a,
+        b: p.b,
+        affinity: Math.round(p.affinity * 1000) / 1000,
+        arcLabel: p.arcLabel,
+        sharedConversationCount: p.sharedConversationCount,
+        lastInteractionSim: p.lastInteractionSim,
+        windowConversationCount: p.windowConversationCount,
+        windowStartDay: p.windowStartDay,
+      }));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, named: namedList, pairs }));
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/admin/sticky-metrics') {
@@ -802,6 +854,14 @@ async function main(): Promise<void> {
           });
         } catch (err) {
           log.error('sticky.shutdown_flush.error', { err });
+        }
+      }
+      if (relationships) {
+        try {
+          await relationships.flush();
+          log.info('relationships.shutdown_flush', { count: relationships.count() });
+        } catch (err) {
+          log.error('relationships.shutdown_flush.error', { err });
         }
       }
     })();

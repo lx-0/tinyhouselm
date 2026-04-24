@@ -23,6 +23,7 @@ import { DefaultHeartbeatPolicy, makeRngForAgent } from './heartbeat.js';
 import type { MemoryFact, ParaMemory } from './memory.js';
 import type { ScheduleEntry } from './named-personas.js';
 import { findPath } from './path.js';
+import type { RelationshipStore } from './relationships.js';
 import {
   type HeardSpeech,
   type ObservedEvent,
@@ -89,6 +90,13 @@ export interface RuntimeOptions {
    * tick. Default 5 — keeps the seam small for an LLM-backed policy later.
    */
   recallLimit?: number;
+  /**
+   * Optional per-pair relationship store (TINA-207). When set, closes between
+   * two named agents update affinity, a daily rollover folds the trailing
+   * 7-sim-day window into an arc label, and named agents' perception packets
+   * get a `zoneAffinityHints` map seeded from current friend positions.
+   */
+  relationships?: RelationshipStore | null;
 }
 
 export type RuntimeEvent =
@@ -258,6 +266,14 @@ export class Runtime {
    */
   private readonly persistPromises = new Set<Promise<void>>();
   private readonly recallLimit: number;
+  private readonly relationships: RelationshipStore | null;
+  /**
+   * Last sim-day we invoked `relationships.rolloverDay()` on. The rollover
+   * itself is idempotent (pairs inside their window are no-ops), but we
+   * still only call it when the day counter advances to avoid pointless
+   * work on every sub-second tick.
+   */
+  private lastRolloverDay: number | null = null;
   private _tickIndex = 0;
   private flushInFlight: Promise<void> | null = null;
 
@@ -279,6 +295,7 @@ export class Runtime {
     this.reflectionsEnabled = opts.reflections !== false;
     this.reflectionOpts = opts.reflections ? opts.reflections : {};
     this.recallLimit = opts.recallLimit ?? 5;
+    this.relationships = opts.relationships ?? null;
     this.world =
       opts.world ??
       new World({
@@ -380,6 +397,17 @@ export class Runtime {
     const simTime = this.world.simTime;
     const tick = this.tickIndex;
     this.emit({ kind: 'tick', tick, simTime });
+
+    // Weekly-arc rollover (TINA-207). Runs at most once per sim-day change
+    // and only collapses pairs whose 7-day window has elapsed — so this is
+    // cheap on every tick and does real work only at day boundaries.
+    if (this.relationships) {
+      const today = Math.floor(simTime / 86_400);
+      if (this.lastRolloverDay === null || today !== this.lastRolloverDay) {
+        this.lastRolloverDay = today;
+        this.relationships.rolloverDay(simTime);
+      }
+    }
 
     for (const agent of this.agents) {
       await this.stepGoto(agent, tick, simTime);
@@ -1067,6 +1095,26 @@ export class Runtime {
   ): Promise<void> {
     const nameById = new Map<string, string>();
     for (const agent of this.agents) nameById.set(agent.def.id, agent.def.name);
+
+    // Affinity update (TINA-207). Only tracked pairs are named×named so the
+    // admin 5×5 grid stays bounded. Procedural agents are intentionally
+    // excluded: their roster churns and the weekly-arc framing only makes
+    // sense for persistent identities. Runs before memory writes — it's
+    // purely in-memory plus a fire-and-forget disk schedule inside the
+    // store, so it can't stall the persist path.
+    if (this.relationships && participants.length === 2) {
+      const [a, b] = participants as [string, string];
+      const agentA = this.agents.find((x) => x.def.id === a);
+      const agentB = this.agents.find((x) => x.def.id === b);
+      if (agentA?.def.named && agentB?.def.named) {
+        this.relationships.recordClose({
+          a,
+          b,
+          simTime: session.lastActivityAt,
+          turnCount: session.transcript.length,
+        });
+      }
+    }
     const transcriptSummary = session.transcript
       .map((t) => `${nameById.get(t.speakerId) ?? t.speakerId}: ${t.text}`)
       .join(' | ');
@@ -1172,6 +1220,23 @@ export class Runtime {
       });
       recentFacts = recalled.map((r) => r.fact);
     }
+    // Per-zone affinity bias for named agents (TINA-207). Aggregates each
+    // known pair's affinity into the zone that other agent currently stands
+    // in, so heartbeat's leisure wander can softly prefer zones where
+    // friends are. Procedural agents get null — no hints → uniform pick.
+    let zoneAffinityHints: Map<string, number> | null = null;
+    if (this.relationships && agent.def.named) {
+      const othersByZone = new Map<string, string>();
+      for (const other of others) {
+        if (!other.def.named) continue;
+        const zone = this.world.zoneAt(other.state.position);
+        if (zone) othersByZone.set(other.def.id, zone);
+      }
+      if (othersByZone.size > 0) {
+        const hints = this.relationships.zoneAffinityFor(agent.def.id, othersByZone);
+        if (hints.size > 0) zoneAffinityHints = hints;
+      }
+    }
     return {
       tick,
       simTime: this.world.simTime,
@@ -1184,6 +1249,7 @@ export class Runtime {
       worldBounds: { width: this.world.width, height: this.world.height },
       zones: [...this.world.zones],
       locations: this.world.locations,
+      zoneAffinityHints,
     };
   }
 

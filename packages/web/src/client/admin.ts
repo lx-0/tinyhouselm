@@ -1043,6 +1043,127 @@ void fetchStickyMetrics();
 // is plenty for a CEO glance panel without hammering the server.
 setInterval(() => void fetchStickyMetrics(), 30_000);
 
+type ArcLabelUi = 'new' | 'warming' | 'cooling' | 'estranged' | 'steady';
+
+interface ArcsPayload {
+  ok: boolean;
+  named: Array<{ id: string; name: string; color: string | null }>;
+  pairs: Array<{
+    a: string;
+    b: string;
+    affinity: number;
+    arcLabel: ArcLabelUi;
+    sharedConversationCount: number;
+    lastInteractionSim: number;
+    windowConversationCount: number;
+  }>;
+}
+
+const ARC_GLYPHS: Record<ArcLabelUi, string> = {
+  new: '🌀',
+  warming: '🌱',
+  cooling: '🥶',
+  estranged: '🔕',
+  steady: '💤',
+};
+
+const arcBodyEl = document.getElementById('arc-grid-body') as HTMLElement;
+
+function renderArcs(payload: ArcsPayload | null): void {
+  if (!payload || !payload.ok) {
+    arcBodyEl.textContent = 'unavailable';
+    arcBodyEl.className = 'status err';
+    return;
+  }
+  const named = payload.named;
+  if (named.length === 0) {
+    arcBodyEl.textContent = 'no named characters loaded';
+    arcBodyEl.className = 'status';
+    return;
+  }
+  const byKey = new Map<string, ArcsPayload['pairs'][number]>();
+  for (const p of payload.pairs) {
+    const key = p.a < p.b ? `${p.a}::${p.b}` : `${p.b}::${p.a}`;
+    byKey.set(key, p);
+  }
+  const table = document.createElement('table');
+  table.className = 'arc-grid';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.appendChild(document.createElement('th'));
+  for (const n of named) {
+    const th = document.createElement('th');
+    th.textContent = n.name.split(/\s+/)[0] ?? n.name;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const row of named) {
+    const tr = document.createElement('tr');
+    const rowHead = document.createElement('th');
+    rowHead.textContent = row.name.split(/\s+/)[0] ?? row.name;
+    tr.appendChild(rowHead);
+    for (const col of named) {
+      const td = document.createElement('td');
+      if (row.id === col.id) {
+        td.classList.add('self');
+        td.textContent = '·';
+      } else {
+        const key = row.id < col.id ? `${row.id}::${col.id}` : `${col.id}::${row.id}`;
+        const pair = byKey.get(key);
+        if (!pair) {
+          td.classList.add('none');
+          td.textContent = '—';
+        } else {
+          td.dataset.arc = pair.arcLabel;
+          const glyph = document.createElement('span');
+          glyph.className = 'glyph';
+          glyph.textContent = ARC_GLYPHS[pair.arcLabel];
+          const aff = document.createElement('span');
+          aff.className = 'aff';
+          aff.textContent = formatAffinity(pair.affinity);
+          td.appendChild(glyph);
+          td.appendChild(aff);
+          td.title = `${row.name} ↔ ${col.name}\n${pair.arcLabel} · affinity ${pair.affinity.toFixed(2)} · ${pair.sharedConversationCount} conv${pair.sharedConversationCount === 1 ? '' : 's'}`;
+        }
+      }
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  arcBodyEl.className = '';
+  arcBodyEl.replaceChildren(table);
+}
+
+function formatAffinity(a: number): string {
+  if (Math.abs(a) < 0.01) return '0.00';
+  const sign = a > 0 ? '+' : '';
+  return `${sign}${a.toFixed(2)}`;
+}
+
+async function fetchArcs(): Promise<void> {
+  try {
+    const res = await fetch('/api/admin/relationships');
+    if (!res.ok) {
+      arcBodyEl.textContent = `unavailable · http ${res.status}`;
+      arcBodyEl.className = 'status err';
+      return;
+    }
+    const data = (await res.json()) as ArcsPayload;
+    renderArcs(data);
+  } catch (err) {
+    arcBodyEl.textContent = `unavailable · ${(err as Error).message}`;
+    arcBodyEl.className = 'status err';
+  }
+}
+
+void fetchArcs();
+// Arcs update at most on conversation close + once per sim-day rollover,
+// so a 20s poll is more than enough.
+setInterval(() => void fetchArcs(), 20_000);
+
 const toastEl = document.getElementById('toast') as HTMLElement;
 let toastTimer: number | null = null;
 function showToast(text: string, kind: 'ok' | 'err' = 'ok'): void {

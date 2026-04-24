@@ -133,7 +133,7 @@ export class DefaultHeartbeatPolicy implements HeartbeatPolicy {
 
     if (!hasGoto && !block && perception.nearby.length === 0 && perception.zones.length > 0) {
       if (rng() < hints.restlessness * 0.5) {
-        const zone = pick(rng, perception.zones);
+        const zone = pickLeisureZone(rng, perception);
         if (zone) {
           const cx = Math.floor(zone.x + zone.width / 2);
           const cy = Math.floor(zone.y + zone.height / 2);
@@ -170,6 +170,42 @@ function pullQuotedPhrases(_haystack: string, _hint: string): string[] | null {
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
+}
+
+/**
+ * Weighted zone pick for the leisure-hour wander path. Falls back to a
+ * uniform pick when no affinity hints are attached (procedural agents, or
+ * named agents with no known pairs yet). Hints are aggregate per-zone
+ * affinity from the caller's named-character pair state (TINA-207).
+ * High-affinity zones get ~1.5× the weight of neutral zones; strongly
+ * negative pairs push the weight down to ~0.5× but never to zero — the
+ * sim still needs a non-zero chance of unexpected encounters for drama.
+ */
+export function pickLeisureZone(
+  rng: Rng,
+  perception: Perception,
+): Perception['zones'][number] | null {
+  const zones = perception.zones;
+  if (zones.length === 0) return null;
+  const hints = perception.zoneAffinityHints;
+  if (!hints || hints.size === 0) return pick(rng, zones) ?? null;
+  const weights: number[] = [];
+  let total = 0;
+  for (const z of zones) {
+    const hint = hints.get(z.name) ?? 0;
+    // Map aggregate affinity into a multiplicative factor in [0.5, 1.5].
+    // hint > 0 (friends here) → boost; hint < 0 (sour pairs) → mild avoid.
+    const w = Math.max(0.5, Math.min(1.5, 1 + hint * 0.5));
+    weights.push(w);
+    total += w;
+  }
+  if (total <= 0) return pick(rng, zones) ?? null;
+  let r = rng() * total;
+  for (let i = 0; i < zones.length; i++) {
+    r -= weights[i]!;
+    if (r <= 0) return zones[i]!;
+  }
+  return zones[zones.length - 1] ?? null;
 }
 
 function wanderStep(from: Vec2, perception: Perception, rng: Rng): Vec2 | null {

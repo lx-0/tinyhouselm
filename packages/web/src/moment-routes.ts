@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ArcLabel, RelationshipStore } from '@tina/sim';
 import type { MomentRecord } from '@tina/shared';
 import type { MomentStore } from './moments.js';
 
@@ -18,8 +19,28 @@ export interface MomentRouteOptions {
   perIpSharePerMin?: number;
   /** Global share rate limit per minute. Default 120. */
   globalSharePerMin?: number;
+  /**
+   * Optional relationship store (TINA-207). When present and both moment
+   * participants are named, the share page surfaces the *current* arc label
+   * — so a link sent 3 days ago reads differently today.
+   */
+  relationships?: RelationshipStore | null;
   now?: () => number;
 }
+
+export interface ArcTag {
+  label: ArcLabel;
+  headline: string;
+  glyph: string;
+}
+
+const ARC_GLYPHS: Record<ArcLabel, string> = {
+  new: '🌀',
+  warming: '🌱',
+  cooling: '🥶',
+  estranged: '🔕',
+  steady: '💤',
+};
 
 interface Bucket {
   count: number;
@@ -36,6 +57,7 @@ export class MomentRoutes {
   private readonly onShare?: () => void;
   private readonly perIpRate: number;
   private readonly globalRate: number;
+  private readonly relationships: RelationshipStore | null;
   private readonly now: () => number;
   private readonly perIp = new Map<string, Bucket>();
   private readonly globalBucket: Bucket = { count: 0, windowStart: 0 };
@@ -47,6 +69,7 @@ export class MomentRoutes {
     this.onShare = opts.onShare;
     this.perIpRate = opts.perIpSharePerMin ?? 20;
     this.globalRate = opts.globalSharePerMin ?? 120;
+    this.relationships = opts.relationships ?? null;
     this.now = opts.now ?? (() => Date.now());
   }
 
@@ -64,8 +87,34 @@ export class MomentRoutes {
       writeHtml(res, 404, notFoundPage());
       return;
     }
-    const html = renderMomentHtml(rec, this.buildCanonicalUrl(canonicalPath ?? `/moment/${id}`));
+    const arc = this.resolveArc(rec);
+    const html = renderMomentHtml(
+      rec,
+      this.buildCanonicalUrl(canonicalPath ?? `/moment/${id}`),
+      arc,
+    );
     writeHtml(res, 200, html);
+  }
+
+  /**
+   * Look up the current arc label for a moment whose participants are both
+   * named. Returns null when relationships aren't configured, either
+   * participant is procedural, or the pair has no recorded history yet.
+   * Read at page-render time on purpose — a link shared days ago surfaces
+   * today's label, which is the v0.5 returner payoff for TINA-207.
+   */
+  private resolveArc(rec: MomentRecord): ArcTag | null {
+    if (!this.relationships) return null;
+    if (rec.participants.length !== 2) return null;
+    const [p1, p2] = rec.participants as [
+      MomentRecord['participants'][number],
+      MomentRecord['participants'][number],
+    ];
+    if (!p1.named || !p2.named) return null;
+    const state = this.relationships.getPair(p1.id, p2.id);
+    if (!state) return null;
+    const headline = `${p1.name} & ${p2.name} — ${state.arcLabel}`;
+    return { label: state.arcLabel, headline, glyph: ARC_GLYPHS[state.arcLabel] };
   }
 
   /**
@@ -221,7 +270,7 @@ export function buildMomentDescription(rec: MomentRecord, max = 160): string {
   return truncate(lines.join(' · '), max);
 }
 
-function renderMomentHtml(rec: MomentRecord, canonical: string): string {
+function renderMomentHtml(rec: MomentRecord, canonical: string, arc: ArcTag | null): string {
   const title = escapeHtml(rec.headline);
   const description = escapeHtml(buildMomentDescription(rec));
   const canonicalEsc = escapeHtml(canonical);
@@ -251,6 +300,9 @@ function renderMomentHtml(rec: MomentRecord, canonical: string): string {
 
   const capturedAt = escapeHtml(rec.capturedAt);
   const closeReason = escapeHtml(rec.closeReason);
+  const arcHtml = arc
+    ? `<div class="arc" data-arc="${escapeHtml(arc.label)}"><span class="glyph">${escapeHtml(arc.glyph)}</span><span>${escapeHtml(arc.headline)}</span></div>`
+    : '';
 
   return `<!doctype html>
 <html lang="en">
@@ -279,6 +331,13 @@ function renderMomentHtml(rec: MomentRecord, canonical: string): string {
     .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: rgba(255,255,255,0.05); font-size: 12px; }
     .chip .sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
     .chip .star { color: #f5c97a; margin-right: 2px; }
+    .arc { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font-size: 12px; letter-spacing: 0.04em; margin-bottom: 16px; background: rgba(185,176,220,0.12); color: #d6d0e6; text-transform: capitalize; }
+    .arc[data-arc="warming"] { background: rgba(140, 200, 150, 0.14); color: #c8e8cf; }
+    .arc[data-arc="cooling"] { background: rgba(150, 180, 230, 0.14); color: #cddaf0; }
+    .arc[data-arc="estranged"] { background: rgba(220, 140, 140, 0.14); color: #f0c7c7; }
+    .arc[data-arc="steady"] { background: rgba(200, 200, 200, 0.10); color: #cccccc; }
+    .arc[data-arc="new"] { background: rgba(245, 201, 122, 0.14); color: #f0d8a8; }
+    .arc .glyph { font-size: 14px; }
     .transcript { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 14px 16px; background: rgba(255,255,255,0.02); }
     .turn { font-size: 13px; line-height: 1.55; margin: 4px 0; word-break: break-word; }
     .turn .name { color: #b9b0dc; font-weight: 500; margin-right: 2px; }
@@ -296,6 +355,7 @@ function renderMomentHtml(rec: MomentRecord, canonical: string): string {
     </header>
     <h1>${title}</h1>
     <div class="meta">${clockLine} · closed (${closeReason}) · captured ${capturedAt}</div>
+    ${arcHtml}
     <div class="chips">${participantChips}</div>
     <div class="transcript">${turnsHtml || '<div class="turn" style="opacity:0.6">(no transcript captured)</div>'}</div>
     ${reflectionHtml}

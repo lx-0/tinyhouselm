@@ -36,6 +36,14 @@ export interface Perception {
   worldBounds: { width: number; height: number };
   zones: Zone[];
   locations: Location[];
+  /**
+   * Optional per-zone affinity weights, aggregated from the agent's pair
+   * relationships with other agents currently in those zones (TINA-207).
+   * Present for named characters when the runtime was configured with a
+   * RelationshipStore; null/undefined otherwise. Heartbeat uses this to
+   * softly bias leisure-hour zone picks toward high-affinity friends.
+   */
+  zoneAffinityHints?: Map<string, number> | null;
 }
 
 const DAY_SECONDS = 86400;

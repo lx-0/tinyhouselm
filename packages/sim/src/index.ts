@@ -97,6 +97,21 @@ export type {
   ConversationOptions,
   CloseReason,
 } from './conversation.js';
+export {
+  RelationshipStore,
+  RELATIONSHIP_FILE,
+  RELATIONSHIP_RECORD_VERSION,
+  pairKey,
+  computeAffinityDelta,
+  deriveArcLabel,
+} from './relationships.js';
+export type {
+  ArcLabel,
+  PairState,
+  RelationshipLogger,
+  RelationshipStoreOptions,
+  RecordCloseInput,
+} from './relationships.js';
 export { Runtime } from './runtime.js';
 export type { WorldStateSnapshot, WorldStateAgentSnapshot } from '@tina/shared';
 export { WORLD_STATE_SNAPSHOT_VERSION } from '@tina/shared';

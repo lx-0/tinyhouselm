@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
+import { RelationshipStore } from '@tina/sim';
 import { type MomentRecord, deriveWorldClock } from '@tina/shared';
 import { describe, expect, test } from 'vitest';
 import { MomentRoutes } from './moment-routes.js';
@@ -239,6 +240,74 @@ describe('MomentRoutes.handleShare', () => {
       res,
     );
     expect(res.statusCode).toBe(401);
+  });
+
+  test('surfaces the current arc label on the share page for named pairs (TINA-207)', () => {
+    const { store, record } = mkStore();
+    const relationships = new RelationshipStore();
+    // Force a warming window: three closes with good turn count.
+    relationships.recordClose({
+      a: 'mei',
+      b: 'hiro',
+      simTime: 100,
+      turnCount: 6,
+    });
+    relationships.recordClose({
+      a: 'mei',
+      b: 'hiro',
+      simTime: 200,
+      turnCount: 6,
+    });
+    relationships.rolloverDay(8 * 86400);
+    const routes = new MomentRoutes({ store, checkAdmin: alwaysOk, relationships });
+    const res = mockRes();
+    routes.handleMomentPage(res, record.id);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('class="arc"');
+    expect(res.body).toContain('data-arc="warming"');
+    expect(res.body).toContain('Mei &amp; Hiro — warming');
+  });
+
+  test('omits arc label when no relationships store is configured', () => {
+    const { store, record } = mkStore();
+    const routes = new MomentRoutes({ store, checkAdmin: alwaysOk });
+    const res = mockRes();
+    routes.handleMomentPage(res, record.id);
+    expect(res.body).not.toContain('class="arc"');
+  });
+
+  test('omits arc label when pair has no recorded history yet', () => {
+    const { store, record } = mkStore();
+    const relationships = new RelationshipStore();
+    const routes = new MomentRoutes({ store, checkAdmin: alwaysOk, relationships });
+    const res = mockRes();
+    routes.handleMomentPage(res, record.id);
+    expect(res.body).not.toContain('class="arc"');
+  });
+
+  test('omits arc label when either participant is procedural', () => {
+    const store = new MomentStore({ maxMoments: 10, idGenerator: () => 'mix1' });
+    store.captureClose(
+      {
+        sessionId: 'mix-s',
+        simTime: 1000,
+        openedAt: 900,
+        transcript: [{ speakerId: 'mei', text: 'hi', at: 900 }],
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: '#ffaaaa' },
+          { id: 'stranger', name: 'Stranger', named: false, color: null },
+        ],
+        zone: 'cafe',
+        closeReason: 'idle',
+      },
+      deriveWorldClock(1000, 30),
+    );
+    const relationships = new RelationshipStore();
+    relationships.recordClose({ a: 'mei', b: 'stranger', simTime: 10, turnCount: 4 });
+    const routes = new MomentRoutes({ store, checkAdmin: alwaysOk, relationships });
+    const res = mockRes();
+    routes.handleMomentPage(res, 'mix1');
+    expect(res.body).not.toContain('class="arc"');
   });
 
   test('rate-limits per-IP and returns 429', async () => {

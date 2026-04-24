@@ -374,6 +374,37 @@
       }
       .sticky-table tr.today td { color: #e7e5ee; }
       .sticky-table .zero { color: #55556a; }
+      .arc-grid {
+        margin-top: 6px;
+        border-collapse: collapse;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 9px;
+      }
+      .arc-grid th, .arc-grid td {
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        padding: 4px 5px;
+        text-align: center;
+        min-width: 34px;
+        vertical-align: middle;
+      }
+      .arc-grid th {
+        color: #8888aa;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .arc-grid td.self { background: rgba(255,255,255,0.02); color: #55556a; }
+      .arc-grid td.none { color: #44445a; }
+      .arc-grid td .glyph { font-size: 12px; display: block; line-height: 1.1; }
+      .arc-grid td .aff { font-size: 8px; color: rgba(255,255,255,0.55); }
+      .arc-grid td[data-arc="warming"] { background: rgba(140, 200, 150, 0.16); }
+      .arc-grid td[data-arc="cooling"] { background: rgba(150, 180, 230, 0.16); }
+      .arc-grid td[data-arc="estranged"] { background: rgba(220, 140, 140, 0.18); }
+      .arc-grid td[data-arc="steady"] { background: rgba(200, 200, 200, 0.08); }
+      .arc-grid td[data-arc="new"] { background: rgba(245, 201, 122, 0.14); }
+      .arc-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 9px; color: #7a7a95; margin-top: 6px; }
+      .arc-legend span { display: inline-flex; align-items: center; gap: 3px; }
       .sticky-footnote {
         font-size: 9px;
         color: #55556a;
@@ -418,6 +449,17 @@
               <div id="sticky-metrics-body" class="status">loading…</div>
               <div class="sticky-footnote">
                 shares · unique /moment visits · 24h + 7d returners (UTC days)
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>named arcs</legend>
+              <div id="arc-grid-body" class="status">loading…</div>
+              <div class="arc-legend">
+                <span>🌱 warming</span>
+                <span>💤 steady</span>
+                <span>🌀 new</span>
+                <span>🥶 cooling</span>
+                <span>🔕 estranged</span>
               </div>
             </fieldset>
             <fieldset>
