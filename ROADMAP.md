@@ -40,7 +40,20 @@ Ordered by impact. `TINA-17` first because it's the single biggest lever on rete
 
 Goal: when something memorable happens, a visitor can grab a link that captures that moment and send it to a friend. The share loop doubles as an acquisition loop.
 
-- `TINA-29` — **Shareable moment URLs. (opener)** Conversations persist a compact moment record on close (timestamp, zone, participants, transcript, optional reflection, deterministic headline). A public `/moment/:id` page renders a read-only view with OG meta tags for rich link previews. `/admin` conversation cards gain a *Share* button that copies the URL to clipboard. Disk-backed LRU (default 500) survives restart; no LLM on the hot path; per-IP rate limit on the share endpoint.
+- `TINA-29` — **Shareable moment URLs. ✅** _(opener, shipped 2026-04-23.)_ Conversations persist a compact moment record on close (timestamp, zone, participants, transcript, optional reflection, deterministic headline). Public `/moment/:id` page with OG meta. `/admin` *Share* button. Disk-backed LRU (default 500), no LLM on hot path, per-IP rate limit.
+- `TINA-100` — **Richer schedules for named characters. ✅** _(shipped 2026-04-23.)_ Per-hour authored schedules so named personas have distinct daily rhythms that make their moments recognizable.
+- `TINA-145` — **Share-link return-rate instrumentation. ✅** _(shipped 2026-04-23 ~18:36.)_ Four counters (share creates, unique /moment visits, 24h returners, 7d returners) + /admin sticky-metrics panel, JSONL-backed, no external analytics. Earliest clean 7-day read: **2026-04-30**.
+- `TINA-207` — **Named-character relationship arcs. ✅** _(shipped 2026-04-24.)_ Affinity updates on named×named closes, weekly deterministic rollover inside `tickOnce`, 5×5 admin grid, `/moment/:id` surfaces current arc label at render time. Leisure wander zones biased by `Perception.zoneAffinityHints`.
+
+### Next unblocked (pick after v0.5 #4)
+
+Depth over breadth until TINA-145 has 7 clean days. "Second authored town" is deferred until **2026-04-30** — only pick it if the first town's return-rate holds up. If it's weak, keep compounding depth on the features above.
+
+Candidates (pick one at a time):
+
+- **Arc-driven interventions.** Extend the /admin intervention system with a `relationship_nudge` type that biases the next named×named close (bounded ±0.25, rate-limited, perception-stream integrated like existing interventions). Closes the loop: viewer acts → arc label shifts within a sim-day → shareable before/after. Stacks cleanly with TINA-17 + TINA-207.
+- **Multi-character events.** Co-presence of 3+ named characters in a zone triggers a group-moment record with its own `/moment/:id` variant. Stacks with TINA-29 + TINA-207.
+- **Zone affordance interventions.** Drop-object (TINA-17) already perception-streams; extend with typed affordances (benches, music, food) that named characters actually route to, amplifying per-zone behavior.
 
 ## Non-goals (explicit)
 
@@ -49,7 +62,7 @@ Goal: when something memorable happens, a visitor can grab a link that captures 
 - Marketplace / user-contributed personas.
 - Monetization.
 
-v0.3 shipped; the forcing function flips to "can a visitor *do* something." Revisit scope after v0.4 ships. v0.4's closer is `TINA-27` (named characters).
+v0.3 shipped; the forcing function flips to "can a visitor *do* something." Revisit scope after v0.4 ships. v0.4's closer is `TINA-27` (named characters). v0.5's closer is TBD — either "second authored town" (if TINA-145 return-rate data justifies cloning on 2026-04-30) or another depth feature if the first town needs more stickiness.
 
 ## How this is driven
 
