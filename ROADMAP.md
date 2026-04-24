@@ -45,14 +45,14 @@ Goal: when something memorable happens, a visitor can grab a link that captures 
 - `TINA-145` — **Share-link return-rate instrumentation. ✅** _(shipped 2026-04-23 ~18:36.)_ Four counters (share creates, unique /moment visits, 24h returners, 7d returners) + /admin sticky-metrics panel, JSONL-backed, no external analytics. Earliest clean 7-day read: **2026-04-30**.
 - `TINA-207` — **Named-character relationship arcs. ✅** _(shipped 2026-04-24.)_ Affinity updates on named×named closes, weekly deterministic rollover inside `tickOnce`, 5×5 admin grid, `/moment/:id` surfaces current arc label at render time. Leisure wander zones biased by `Perception.zoneAffinityHints`.
 - `TINA-275` — **Arc-driven interventions. ✅** _(shipped 2026-04-24.)_ New `relationship_nudge` intervention (spark / tension / reconcile), persisted one-shot queue in `RelationshipStore`, consumed on next named×named close, both participants receive a deterministic perception event, `/admin` 5×5 pair picker + three-way radio, `/moment/:id` "viewer-nudged" pill at render time, new `nudges_applied` counter in the sticky-metrics rollup.
+- `TINA-345` — **Multi-character group moments. ✅** _(shipped 2026-04-24.)_ Detector inside `tickOnce` watches for ≥3 named agents standing in the same zone for N consecutive ticks (env-tunable, default 3). Fires a `group_moment` runtime event → captured as a new `group`-variant `MomentRecord` with deterministic "A, B, and C met at {Zone}" headline, empty transcript, dedup by (zone, participant-set, sim-day). `/moment/:id` renders the group variant with a badge + pairwise arc labels. `/admin` conversation feed gets a distinct `group` row. New `group_moments_created` counter in the sticky-metrics rollup. No LLM on hot path; tracker state + dedup map are LRU-bounded.
 
-### Next unblocked (pick after v0.5 #5)
+### Next unblocked (pick after v0.5 #6)
 
 Depth over breadth until TINA-145 has 7 clean days. "Second authored town" is deferred until **2026-04-30** — only pick it if the first town's return-rate holds up. If it's weak, keep compounding depth on the features above.
 
 Candidates (pick one at a time):
 
-- **Multi-character events.** Co-presence of 3+ named characters in a zone triggers a group-moment record with its own `/moment/:id` variant. Stacks with TINA-29 + TINA-207.
 - **Zone affordance interventions.** Drop-object (TINA-17) already perception-streams; extend with typed affordances (benches, music, food) that named characters actually route to, amplifying per-zone behavior.
 
 ## Non-goals (explicit)

@@ -117,11 +117,13 @@ export class MomentRoutes {
     }
     const arc = this.resolveArc(rec);
     const nudge = this.resolveNudge(rec);
+    const groupArcs = this.resolveGroupArcs(rec);
     const html = renderMomentHtml(
       rec,
       this.buildCanonicalUrl(canonicalPath ?? `/moment/${id}`),
       arc,
       nudge,
+      groupArcs,
     );
     writeHtml(res, 200, html);
   }
@@ -168,6 +170,34 @@ export class MomentRoutes {
     if (!state) return null;
     const headline = `${p1.name} & ${p2.name} — ${state.arcLabel}`;
     return { label: state.arcLabel, headline, glyph: ARC_GLYPHS[state.arcLabel] };
+  }
+
+  /**
+   * Per-pair arc tags for a group moment (TINA-345). Reads the current arc
+   * label for every named×named pair in the record, so a link shared days
+   * ago surfaces today's labels alongside the co-presence headline. Skips
+   * pairs with no recorded history (procedural × named, or first meeting).
+   */
+  private resolveGroupArcs(rec: MomentRecord): ArcTag[] {
+    if (!this.relationships) return [];
+    if (rec.variant !== 'group') return [];
+    const tags: ArcTag[] = [];
+    const parts = rec.participants;
+    for (let i = 0; i < parts.length; i++) {
+      for (let j = i + 1; j < parts.length; j++) {
+        const p1 = parts[i]!;
+        const p2 = parts[j]!;
+        if (!p1.named || !p2.named) continue;
+        const state = this.relationships.getPair(p1.id, p2.id);
+        if (!state) continue;
+        tags.push({
+          label: state.arcLabel,
+          headline: `${p1.name} & ${p2.name} — ${state.arcLabel}`,
+          glyph: ARC_GLYPHS[state.arcLabel],
+        });
+      }
+    }
+    return tags;
   }
 
   /**
@@ -328,10 +358,12 @@ function renderMomentHtml(
   canonical: string,
   arc: ArcTag | null,
   nudge: NudgeTag | null,
+  groupArcs: ArcTag[] = [],
 ): string {
   const title = escapeHtml(rec.headline);
   const description = escapeHtml(buildMomentDescription(rec));
   const canonicalEsc = escapeHtml(canonical);
+  const isGroup = rec.variant === 'group';
 
   const participantChips = rec.participants
     .map((p) => {
@@ -363,6 +395,17 @@ function renderMomentHtml(
     : '';
   const nudgeHtml = nudge
     ? `<div class="nudge" data-nudge="${escapeHtml(nudge.direction)}"><span class="glyph">${escapeHtml(nudge.glyph)}</span><span>${escapeHtml(nudge.label)}</span></div>`
+    : '';
+  const groupBadgeHtml = isGroup
+    ? `<div class="group-badge"><span class="glyph">👥</span><span>group moment · ${rec.participants.length} named</span></div>`
+    : '';
+  const groupArcsHtml = groupArcs.length
+    ? `<div class="group-arcs">${groupArcs
+        .map(
+          (t) =>
+            `<span class="arc" data-arc="${escapeHtml(t.label)}"><span class="glyph">${escapeHtml(t.glyph)}</span><span>${escapeHtml(t.headline)}</span></span>`,
+        )
+        .join('')}</div>`
     : '';
 
   return `<!doctype html>
@@ -404,6 +447,11 @@ function renderMomentHtml(
     .nudge[data-nudge="tension"] { background: rgba(230, 150, 150, 0.18); color: #f2c3c3; }
     .nudge[data-nudge="reconcile"] { background: rgba(150, 210, 180, 0.18); color: #c9e9d6; }
     .nudge .glyph { font-size: 12px; }
+    .group-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font-size: 12px; letter-spacing: 0.04em; margin-bottom: 16px; background: rgba(185,176,220,0.18); color: #e2d8f3; text-transform: capitalize; }
+    .group-badge .glyph { font-size: 14px; }
+    .group-arcs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 18px; }
+    .group-arcs .arc { margin-bottom: 0; }
+    .group-empty { border: 1px dashed rgba(255,255,255,0.12); border-radius: 8px; padding: 14px 16px; font-size: 13px; line-height: 1.55; color: #9a93b8; background: rgba(255,255,255,0.02); }
     .transcript { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 14px 16px; background: rgba(255,255,255,0.02); }
     .turn { font-size: 13px; line-height: 1.55; margin: 4px 0; word-break: break-word; }
     .turn .name { color: #b9b0dc; font-weight: 500; margin-right: 2px; }
@@ -420,10 +468,15 @@ function renderMomentHtml(
       <a href="/">live sim →</a>
     </header>
     <h1>${title}</h1>
-    <div class="meta">${clockLine} · closed (${closeReason}) · captured ${capturedAt}</div>
-    ${arcHtml}${nudgeHtml}
+    <div class="meta">${clockLine} · ${isGroup ? 'co-presence' : `closed (${closeReason})`} · captured ${capturedAt}</div>
+    ${groupBadgeHtml}${arcHtml}${nudgeHtml}
     <div class="chips">${participantChips}</div>
-    <div class="transcript">${turnsHtml || '<div class="turn" style="opacity:0.6">(no transcript captured)</div>'}</div>
+    ${groupArcsHtml}
+    ${
+      isGroup
+        ? '<div class="group-empty">No transcript — this is a co-presence record. Named characters shared the same zone long enough to count as a group moment.</div>'
+        : `<div class="transcript">${turnsHtml || '<div class="turn" style="opacity:0.6">(no transcript captured)</div>'}</div>`
+    }
     ${reflectionHtml}
     <footer>moment id · ${escapeHtml(rec.id)}</footer>
   </main>

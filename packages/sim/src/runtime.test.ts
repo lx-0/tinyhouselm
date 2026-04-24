@@ -684,6 +684,110 @@ describe('Runtime', () => {
     expect(pair!.arcLabel).toBe('new');
   });
 
+  it('fires group_moment events when 3+ named agents sit in the same zone (TINA-345)', async () => {
+    const namedSkill = (name: string): SkillDocument =>
+      parseSkillSource(
+        `---\nname: ${name}\ndescription: chatty social\nmetadata:\n  named: true\n---\n\n# ${name}\n`,
+        `/virtual/${name}/SKILL.md`,
+      );
+    const world = new World({
+      width: 12,
+      height: 12,
+      clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
+      zones: [{ name: 'cafe', x: 0, y: 0, width: 4, height: 4 }],
+    });
+    const rootA = await mkdtemp(join(tmpdir(), 'tina-grp-a-'));
+    const rootB = await mkdtemp(join(tmpdir(), 'tina-grp-b-'));
+    const rootC = await mkdtemp(join(tmpdir(), 'tina-grp-c-'));
+    const events: RuntimeEvent[] = [];
+    const runtime = new Runtime({
+      world,
+      policy: silentPolicy,
+      seed: 42,
+      tickMs: 100,
+      memoryFlushEveryTicks: 0,
+      reflections: false,
+      recallLimit: 0,
+      groupMoments: { minConsecutiveTicks: 2, minParticipants: 3 },
+      onEvent: (e) => events.push(e),
+      agents: [
+        {
+          skill: namedSkill('mei'),
+          memory: new ParaMemory({ root: rootA, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 1, y: 1 } },
+        },
+        {
+          skill: namedSkill('hiro'),
+          memory: new ParaMemory({ root: rootB, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 2, y: 1 } },
+        },
+        {
+          skill: namedSkill('ava'),
+          memory: new ParaMemory({ root: rootC, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 1, y: 2 } },
+        },
+      ],
+    });
+    await runtime.runTicks(4);
+    const fires = events.filter((e) => e.kind === 'group_moment');
+    expect(fires.length).toBeGreaterThanOrEqual(1);
+    const first = fires[0];
+    if (first?.kind !== 'group_moment') throw new Error('typeguard');
+    expect(first.zone).toBe('cafe');
+    expect([...first.participants].sort()).toEqual(['ava', 'hiro', 'mei']);
+    expect(first.sessionId).toMatch(/^grp-/);
+  });
+
+  it('does not fire group_moment with procedural agents (TINA-345)', async () => {
+    const named = (name: string, isNamed: boolean): SkillDocument =>
+      parseSkillSource(
+        `---\nname: ${name}\ndescription: chatty${isNamed ? '\nmetadata:\n  named: true' : ''}\n---\n\n# ${name}\n`,
+        `/virtual/${name}/SKILL.md`,
+      );
+    const world = new World({
+      width: 12,
+      height: 12,
+      clock: new SimulationClock({ mode: 'stepped', speed: 60, tickHz: 10 }),
+      zones: [{ name: 'cafe', x: 0, y: 0, width: 4, height: 4 }],
+    });
+    const rootA = await mkdtemp(join(tmpdir(), 'tina-grp-proc-a-'));
+    const rootB = await mkdtemp(join(tmpdir(), 'tina-grp-proc-b-'));
+    const rootC = await mkdtemp(join(tmpdir(), 'tina-grp-proc-c-'));
+    const events: RuntimeEvent[] = [];
+    const runtime = new Runtime({
+      world,
+      policy: silentPolicy,
+      seed: 5,
+      tickMs: 100,
+      memoryFlushEveryTicks: 0,
+      reflections: false,
+      recallLimit: 0,
+      groupMoments: { minConsecutiveTicks: 1, minParticipants: 3 },
+      onEvent: (e) => events.push(e),
+      agents: [
+        {
+          skill: named('mei', true),
+          memory: new ParaMemory({ root: rootA, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 1, y: 1 } },
+        },
+        {
+          skill: named('hiro', true),
+          memory: new ParaMemory({ root: rootB, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 2, y: 1 } },
+        },
+        // Procedural filler — tracker should not count it.
+        {
+          skill: named('stranger', false),
+          memory: new ParaMemory({ root: rootC, now: () => new Date('2026-04-18T00:00:00Z') }),
+          initial: { position: { x: 1, y: 2 } },
+        },
+      ],
+    });
+    await runtime.runTicks(3);
+    const fires = events.filter((e) => e.kind === 'group_moment');
+    expect(fires).toHaveLength(0);
+  });
+
   it('does not create a pair when one participant is procedural (TINA-207)', async () => {
     const namedSkill = (name: string, named: boolean): SkillDocument =>
       parseSkillSource(

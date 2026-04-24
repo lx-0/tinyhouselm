@@ -5,6 +5,7 @@ import {
   type ConversationTurn,
   MOMENT_RECORD_VERSION,
   type WorldClock,
+  buildGroupMomentHeadline,
   buildMomentHeadline,
   deriveWorldClock,
 } from '@tina/shared';
@@ -302,6 +303,107 @@ describe('MomentStore.attachReflection', () => {
       simTime: 1100,
     });
     expect(attachedTo).toBeNull();
+  });
+});
+
+describe('buildGroupMomentHeadline', () => {
+  test('three named participants + zone', () => {
+    expect(
+      buildGroupMomentHeadline({
+        participants: [{ name: 'Mei' }, { name: 'Hiro' }, { name: 'Ava' }],
+        zone: 'Town Square',
+        clock: { hour: 15, minute: 14 },
+      }),
+    ).toBe('Mei, Hiro, and Ava met at Town Square at 3:14pm');
+  });
+
+  test('four participants preserve oxford comma', () => {
+    expect(
+      buildGroupMomentHeadline({
+        participants: [{ name: 'A' }, { name: 'B' }, { name: 'C' }, { name: 'D' }],
+        zone: 'cafe',
+        clock: { hour: 7, minute: 2 },
+      }),
+    ).toBe('A, B, C, and D met at cafe at 7:02am');
+  });
+
+  test('null zone elides the "at {zone}" fragment', () => {
+    expect(
+      buildGroupMomentHeadline({
+        participants: [{ name: 'A' }, { name: 'B' }, { name: 'C' }],
+        zone: null,
+        clock: { hour: 0, minute: 0 },
+      }),
+    ).toBe('A, B, and C met at 12:00am');
+  });
+});
+
+describe('MomentStore.captureGroup', () => {
+  test('builds a group-variant record with group headline + empty transcript', () => {
+    const store = mkStore({ idGenerator: mkIdSeq('grp') });
+    const participants = [
+      { id: 'mei', name: 'Mei', named: true, color: '#ff00aa' },
+      { id: 'hiro', name: 'Hiro', named: true, color: '#00ccff' },
+      { id: 'ava', name: 'Ava', named: true, color: '#ffee88' },
+    ];
+    const rec = store.captureGroup(
+      {
+        sessionId: 'grp-12-1',
+        simTime: 15 * 3600 + 14 * 60,
+        participants,
+        zone: 'Town Square',
+      },
+      clockAt(15, 14),
+    );
+    expect(rec.id).toBe('grp1');
+    expect(rec.variant).toBe('group');
+    expect(rec.headline).toBe('Mei, Hiro, and Ava met at Town Square at 3:14pm');
+    expect(rec.transcript).toEqual([]);
+    expect(rec.closeReason).toBe('group');
+    expect(rec.openedAt).toBe(rec.closedAt);
+    expect(rec.participants).toEqual(participants);
+  });
+
+  test('returns existing record on duplicate sessionId', () => {
+    const store = mkStore({ idGenerator: mkIdSeq('grp') });
+    const participants = [
+      { id: 'a', name: 'A', named: true, color: null },
+      { id: 'b', name: 'B', named: true, color: null },
+      { id: 'c', name: 'C', named: true, color: null },
+    ];
+    const r1 = store.captureGroup(
+      { sessionId: 'same', simTime: 100, participants, zone: 'park' },
+      clockAt(8, 0),
+    );
+    const r2 = store.captureGroup(
+      { sessionId: 'same', simTime: 200, participants, zone: 'cafe' },
+      clockAt(9, 0),
+    );
+    expect(r1.id).toBe(r2.id);
+    expect(r2.zone).toBe('park'); // Original kept.
+  });
+
+  test('attachReflection skips group-variant moments', () => {
+    const store = mkStore();
+    const participants = [
+      { id: 'mei', name: 'Mei', named: true, color: null },
+      { id: 'hiro', name: 'Hiro', named: true, color: null },
+      { id: 'ava', name: 'Ava', named: true, color: null },
+    ];
+    const rec = store.captureGroup(
+      { sessionId: 'grp-1', simTime: 1000, participants, zone: 'cafe' },
+      clockAt(1, 0),
+    );
+    const attached = store.attachReflection({
+      reflectionId: 'refl-1',
+      agentId: 'mei',
+      summary: 'reflecting',
+      sourceCount: 3,
+      trigger: 'importance_budget',
+      simTime: 1100,
+    });
+    expect(attached).toBeNull();
+    expect(store.get(rec.id)?.reflection).toBeNull();
   });
 });
 

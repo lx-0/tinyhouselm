@@ -364,6 +364,69 @@ describe('MomentRoutes.handleShare', () => {
     expect(res.body).not.toContain('class="nudge"');
   });
 
+  test('renders group-variant moment with group badge + no transcript (TINA-345)', () => {
+    const store = new MomentStore({ maxMoments: 10, idGenerator: () => 'grp1' });
+    store.captureGroup(
+      {
+        sessionId: 'grp-sess',
+        simTime: 15 * 3600,
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: '#ffaaaa' },
+          { id: 'hiro', name: 'Hiro', named: true, color: '#aaffff' },
+          { id: 'ava', name: 'Ava', named: true, color: '#ffee88' },
+        ],
+        zone: 'Town Square',
+      },
+      deriveWorldClock(15 * 3600, 30),
+    );
+    const routes = new MomentRoutes({ store, checkAdmin: alwaysOk });
+    const res = mockRes();
+    routes.handleMomentPage(res, 'grp1');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('Mei, Hiro, and Ava met at Town Square');
+    expect(res.body).toContain('class="group-badge"');
+    expect(res.body).toContain('group moment · 3 named');
+    expect(res.body).toContain('co-presence record');
+    expect(res.body).not.toContain('class="transcript"');
+  });
+
+  test('surfaces pairwise arc labels on a group moment when all pairs are named', () => {
+    const store = new MomentStore({ maxMoments: 10, idGenerator: () => 'grp2' });
+    store.captureGroup(
+      {
+        sessionId: 'grp-arcs',
+        simTime: 15 * 3600,
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: null },
+          { id: 'hiro', name: 'Hiro', named: true, color: null },
+          { id: 'ava', name: 'Ava', named: true, color: null },
+        ],
+        zone: 'cafe',
+      },
+      deriveWorldClock(15 * 3600, 30),
+    );
+    const relationships = new RelationshipStore();
+    // Give each pair enough closes to land on a non-new arc so we can assert
+    // the label shows up in the render.
+    for (const [a, b] of [
+      ['mei', 'hiro'],
+      ['mei', 'ava'],
+      ['hiro', 'ava'],
+    ] as const) {
+      relationships.recordClose({ a, b, simTime: 10, turnCount: 6 });
+      relationships.recordClose({ a, b, simTime: 60, turnCount: 6 });
+    }
+    const routes = new MomentRoutes({ store, checkAdmin: alwaysOk, relationships });
+    const res = mockRes();
+    routes.handleMomentPage(res, 'grp2');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('class="group-arcs"');
+    // Expect all three pairs to have a labelled chip inside the group-arcs strip.
+    expect(res.body).toContain('Mei &amp; Hiro');
+    expect(res.body).toContain('Mei &amp; Ava');
+    expect(res.body).toContain('Hiro &amp; Ava');
+  });
+
   test('rate-limits per-IP and returns 429', async () => {
     const { store } = mkStore();
     const nowMs = 1_000_000;

@@ -362,6 +362,30 @@ function applyDelta(d: Delta): void {
       renderAgents();
       return;
     }
+    case 'group_moment': {
+      // TINA-345: render as a synthetic closed "conversation" row with a
+      // distinct `group` reason so the existing feed surfaces it. Share
+      // button re-uses the same /api/admin/moment/share lookup by sessionId
+      // — the runtime mints a stable id the server already wired into the
+      // moment store.
+      state.conversations.set(d.sessionId, {
+        sessionId: d.sessionId,
+        participants: [...d.participants],
+        transcript: [],
+        openedAt: d.simTime,
+        closedAt: d.simTime,
+        live: false,
+        reason: 'group',
+      });
+      const label = d.participants.map(displayName).join(', ');
+      for (const id of d.participants) {
+        pushAgentEvent(id, `group moment · ${d.zone} (${label})`);
+      }
+      trimConversations();
+      renderConversations();
+      renderAgents();
+      return;
+    }
   }
 }
 
@@ -464,19 +488,31 @@ function renderConversations(): void {
   for (const row of rows) {
     const names = row.participants.map(displayName);
     if (filter && !names.some((n) => n.toLowerCase().includes(filter))) continue;
+    const isGroup = row.reason === 'group';
     const el = document.createElement('div');
-    el.className = `conv${row.live ? ' live' : ''}`;
+    el.className = `conv${row.live ? ' live' : ''}${isGroup ? ' group' : ''}`;
     const header = document.createElement('header');
     const parts = document.createElement('span');
     parts.className = 'participants';
-    parts.textContent = names.join(' · ');
+    if (isGroup) {
+      const badge = document.createElement('span');
+      badge.className = 'group-badge';
+      badge.textContent = 'group';
+      badge.title = `${names.length} named characters co-present`;
+      parts.appendChild(badge);
+      parts.appendChild(document.createTextNode(` ${names.join(', ')}`));
+    } else {
+      parts.textContent = names.join(' · ');
+    }
     const meta = document.createElement('span');
     meta.className = 'meta';
     const simTime = row.closedAt ?? row.openedAt;
     const metaText = document.createElement('span');
     metaText.textContent = row.live
       ? `live · ${row.transcript.length}t`
-      : `${row.transcript.length}t · ${row.reason ?? 'closed'}`;
+      : isGroup
+        ? 'co-presence'
+        : `${row.transcript.length}t · ${row.reason ?? 'closed'}`;
     meta.appendChild(metaText);
     // Share button — enabled once the session closes and we have a moment
     // to link to. Multi-party only (solo rows get sessionId prefixes that
@@ -967,6 +1003,7 @@ interface StickyDailyRollup {
   returningVisits24h: number;
   returningVisits7d: number;
   nudgesApplied?: number;
+  groupMomentsCreated?: number;
 }
 
 interface StickyMetricsPayload {
@@ -995,13 +1032,14 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
   table.className = 'sticky-table';
   const thead = document.createElement('thead');
   thead.innerHTML =
-    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th></tr>';
+    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th></tr>';
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const d of rows) {
     const tr = document.createElement('tr');
     if (d.date === today) tr.className = 'today';
     const nudges = d.nudgesApplied ?? 0;
+    const groupMoments = d.groupMomentsCreated ?? 0;
     const cells: Array<[string, boolean]> = [
       [d.date.slice(5), false],
       [String(d.sharesCreated), d.sharesCreated === 0],
@@ -1009,6 +1047,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
       [String(d.returningVisits24h), d.returningVisits24h === 0],
       [String(d.returningVisits7d), d.returningVisits7d === 0],
       [String(nudges), nudges === 0],
+      [String(groupMoments), groupMoments === 0],
     ];
     for (const [text, isZero] of cells) {
       const td = document.createElement('td');

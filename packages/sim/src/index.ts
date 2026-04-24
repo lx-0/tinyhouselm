@@ -97,6 +97,12 @@ export type {
   ConversationOptions,
   CloseReason,
 } from './conversation.js';
+export { GroupMomentTracker } from './group-moments.js';
+export type {
+  GroupMomentOptions,
+  GroupMomentCandidate,
+  ObserveInput as GroupMomentObserveInput,
+} from './group-moments.js';
 export {
   RelationshipStore,
   RELATIONSHIP_FILE,
@@ -123,6 +129,7 @@ export type {
   RuntimeOptions,
   RuntimeAgent,
   RuntimeEvent,
+  GroupMomentTrackerOptions,
   InterventionWhisperInput,
   InterventionEventInput,
   InterventionDropObjectInput,

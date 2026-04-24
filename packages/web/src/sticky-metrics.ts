@@ -8,7 +8,7 @@ export const STICKY_METRICS_VERSION = 1;
 /**
  * Share-loop return-rate instrumentation (TINA-145).
  *
- * Tracks five counters with a 7-day daily rollup behind `/admin`:
+ * Tracks six counters with a 7-day daily rollup behind `/admin`:
  *   1. shares_created       — `/admin` Share clicks (one per successful mint).
  *   2. moment_unique_visits — unique visitors landing on `/moment/:id`,
  *                             deduped per-day by the `tvid` visitor cookie.
@@ -19,6 +19,10 @@ export const STICKY_METRICS_VERSION = 1;
  *                             consumed by a named×named close (TINA-275).
  *                             Counts the signal, not the submission, so
  *                             queued-but-never-consumed nudges are invisible.
+ *   6. group_moments_created — 3+ named co-presence events detected by the
+ *                             runtime and minted into the moment store
+ *                             (TINA-345). One bump per fire, deduped per
+ *                             (zone, participant-set) per sim-day upstream.
  *
  * Constraints (see TINA-145):
  *   - Counter bumps are synchronous; persistence is fire-and-forget
@@ -75,6 +79,8 @@ interface DayState {
   returns7d: number;
   /** Viewer nudges consumed by a close this day (TINA-275). */
   nudgesApplied: number;
+  /** 3+ named co-presence moments minted this day (TINA-345). */
+  groupMomentsCreated: number;
 }
 
 interface VisitorState {
@@ -93,6 +99,8 @@ interface PersistedDay {
   returns7d: number;
   /** Absent on payloads written before TINA-275; treated as 0 on load. */
   nudgesApplied?: number;
+  /** Absent on payloads written before TINA-345; treated as 0 on load. */
+  groupMomentsCreated?: number;
 }
 
 interface PersistedVisitor {
@@ -115,6 +123,7 @@ export interface DailyRollup {
   returningVisits24h: number;
   returningVisits7d: number;
   nudgesApplied: number;
+  groupMomentsCreated: number;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -229,6 +238,7 @@ export class StickyMetrics {
         returns24h: Number(d.returns24h) || 0,
         returns7d: Number(d.returns7d) || 0,
         nudgesApplied: Number(d.nudgesApplied) || 0,
+        groupMomentsCreated: Number(d.groupMomentsCreated) || 0,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -278,6 +288,17 @@ export class StickyMetrics {
   }
 
   /**
+   * Record a minted group co-presence moment (TINA-345). Counts the fire at
+   * the moment it reaches the moment store — upstream dedup already caps this
+   * to one per (zone, participant-set) per sim-day.
+   */
+  recordGroupMoment(): void {
+    const day = this.day(dayKeyUtc(this.now()));
+    day.groupMomentsCreated += 1;
+    this.scheduleFlush();
+  }
+
+  /**
    * Record a visit to `/moment/:id`. Dedupes by visitor per-day up to the
    * configured cap; past the cap the counter still climbs so the 7-day
    * rollup stays directionally correct.
@@ -323,6 +344,7 @@ export class StickyMetrics {
         returningVisits24h: d?.returns24h ?? 0,
         returningVisits7d: d?.returns7d ?? 0,
         nudgesApplied: d?.nudgesApplied ?? 0,
+        groupMomentsCreated: d?.groupMomentsCreated ?? 0,
       });
     }
     return out;
@@ -357,6 +379,7 @@ export class StickyMetrics {
         returns24h: 0,
         returns7d: 0,
         nudgesApplied: 0,
+        groupMomentsCreated: 0,
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -443,6 +466,7 @@ export class StickyMetrics {
         returns24h: d.returns24h,
         returns7d: d.returns7d,
         nudgesApplied: d.nudgesApplied,
+        groupMomentsCreated: d.groupMomentsCreated,
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,

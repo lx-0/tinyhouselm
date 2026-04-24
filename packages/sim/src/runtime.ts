@@ -18,6 +18,7 @@ import {
   ConversationRegistry,
   type ConversationSession,
 } from './conversation.js';
+import { GroupMomentTracker } from './group-moments.js';
 import type { HeartbeatPolicy } from './heartbeat.js';
 import { DefaultHeartbeatPolicy, makeRngForAgent } from './heartbeat.js';
 import type { MemoryFact, ParaMemory } from './memory.js';
@@ -97,6 +98,26 @@ export interface RuntimeOptions {
    * get a `zoneAffinityHints` map seeded from current friend positions.
    */
   relationships?: RelationshipStore | null;
+  /**
+   * Multi-character group moment detection (TINA-345). Fire events when ≥N
+   * named agents are co-present in the same zone for N consecutive ticks.
+   * Set `false` to disable the tracker entirely. Default: enabled with
+   * conservative defaults.
+   */
+  groupMoments?: GroupMomentTrackerOptions | false;
+}
+
+/**
+ * Runtime-facing config for the group-moment tracker. Narrower alias of the
+ * tracker's own options so we don't leak a second unrelated module type.
+ */
+export interface GroupMomentTrackerOptions {
+  /** Minimum cohort size. Default 3. */
+  minParticipants?: number;
+  /** Minimum consecutive ticks of stable co-presence. Default 3. */
+  minConsecutiveTicks?: number;
+  /** LRU cap on the per-day dedup map. Default 512. */
+  maxDedupEntries?: number;
 }
 
 export type RuntimeEvent =
@@ -183,6 +204,20 @@ export type RuntimeEvent =
       a: string;
       b: string;
       direction: NudgeDirection;
+    }
+  /**
+   * Emitted when ≥3 named agents have been co-present in the same zone for
+   * the configured consecutive-tick threshold (TINA-345). Carries a synthetic
+   * session id so the web layer can mint a stable moment record for the
+   * share page. Participants are sorted by id (deterministic).
+   */
+  | {
+      kind: 'group_moment';
+      tick: number;
+      simTime: SimTime;
+      sessionId: string;
+      zone: string;
+      participants: string[];
     };
 
 interface Recent {
@@ -299,6 +334,12 @@ export class Runtime {
    * work on every sub-second tick.
    */
   private lastRolloverDay: number | null = null;
+  /**
+   * Optional 3+ named co-presence detector (TINA-345). Disabled → null.
+   */
+  private readonly groupMoments: GroupMomentTracker | null;
+  /** Monotonic counter for synthetic group-moment session ids. */
+  private groupMomentSeq = 0;
   private _tickIndex = 0;
   private flushInFlight: Promise<void> | null = null;
 
@@ -321,6 +362,8 @@ export class Runtime {
     this.reflectionOpts = opts.reflections ? opts.reflections : {};
     this.recallLimit = opts.recallLimit ?? 5;
     this.relationships = opts.relationships ?? null;
+    this.groupMoments =
+      opts.groupMoments === false ? null : new GroupMomentTracker(opts.groupMoments ?? {});
     this.world =
       opts.world ??
       new World({
@@ -487,6 +530,7 @@ export class Runtime {
     }
 
     this.sweepConversations(tick, simTime);
+    this.sweepGroupMoments(tick, simTime);
     this._tickIndex += 1;
     this.telemetry.setActiveConversations(this.conversations.activeCount());
     this.telemetry.recordTickDuration(performance.now() - tickStart);
@@ -1168,6 +1212,45 @@ export class Runtime {
     });
     for (const { session, reason } of pending) {
       this.handleConversationClose(session, reason, tick, simTime);
+    }
+  }
+
+  /**
+   * Detect 3+ named co-presence groups (TINA-345). Runs after the per-agent
+   * loop and the conversation sweep so zone assignments are already up-to-date
+   * for this tick. Fires purely in-memory — no LLM, no disk, no blocking I/O.
+   * The web layer captures group moments via the emitted `group_moment` event.
+   */
+  private sweepGroupMoments(tick: number, simTime: SimTime): void {
+    if (!this.groupMoments) return;
+    const byZone = new Map<string, string[]>();
+    for (const agent of this.agents) {
+      if (!agent.def.named) continue;
+      const zone = agent.state.zone;
+      if (!zone) continue;
+      const arr = byZone.get(zone);
+      if (arr) arr.push(agent.def.id);
+      else byZone.set(zone, [agent.def.id]);
+    }
+    const fires = this.groupMoments.observe({ tick, simTime, byZone });
+    for (const fire of fires) {
+      this.groupMomentSeq += 1;
+      const sessionId = `grp-${tick}-${this.groupMomentSeq}`;
+      this.emit({
+        kind: 'group_moment',
+        tick,
+        simTime,
+        sessionId,
+        zone: fire.zone,
+        participants: [...fire.participantIds],
+      });
+      this.world.emit({
+        kind: 'group_moment',
+        sessionId,
+        zone: fire.zone,
+        participants: [...fire.participantIds],
+        simTime,
+      });
     }
   }
 

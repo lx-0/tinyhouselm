@@ -73,6 +73,34 @@ export function buildMomentHeadline(input: {
   return `${whoPart}${verb}${zonePart}${timePart}`;
 }
 
+/**
+ * Deterministic headline for a group co-presence moment (TINA-345). Distinct
+ * from `buildMomentHeadline` because group moments have no transcript — the
+ * verb is always "met" and zone is rendered as "at {Zone}" rather than "in
+ * the {Zone}" to match the spec example. Falls back gracefully if a caller
+ * passes fewer than 2 participants.
+ *
+ *   "Mei, Hiro, and Ava met at Town Square at 3:14pm"
+ */
+export function buildGroupMomentHeadline(input: {
+  participants: Array<{ name: string }>;
+  zone: string | null;
+  clock: Pick<WorldClock, 'hour' | 'minute'>;
+}): string {
+  const names = input.participants.map((p) => p.name).filter((n) => n.length > 0);
+  const whoPart =
+    names.length === 0
+      ? 'A crowd'
+      : names.length === 1
+        ? `${names[0]}`
+        : names.length === 2
+          ? `${names[0]} and ${names[1]}`
+          : `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
+  const zonePart = input.zone ? ` at ${input.zone}` : '';
+  const timePart = ` at ${formatTimeOfDay(input.clock.hour, input.clock.minute)}`;
+  return `${whoPart} met${zonePart}${timePart}`;
+}
+
 function formatTimeOfDay(hour: number, minute: number): string {
   const h12 = ((hour + 11) % 12) + 1;
   const suffix = hour < 12 ? 'am' : 'pm';
@@ -256,6 +284,18 @@ export type Delta =
       zone: string | null;
       affected: string[];
       simTime: SimTime;
+    }
+  /**
+   * Multi-character group co-presence moment (TINA-345). Fired when ≥3 named
+   * agents sit in the same zone together for N consecutive ticks. Carries a
+   * synthetic session id so the web layer can build a stable moment record.
+   */
+  | {
+      kind: 'group_moment';
+      sessionId: string;
+      zone: string;
+      participants: string[];
+      simTime: SimTime;
     };
 
 export type StreamMessage = Snapshot | Delta;
@@ -284,10 +324,22 @@ export type MomentReflection = {
 
 export const MOMENT_RECORD_VERSION = 1;
 
+/**
+ * Which flavor of moment this record captures. `'conversation'` is the
+ * original TINA-29 shape (≥2 participants with a transcript from a closed
+ * conversation session). `'group'` is a TINA-345 co-presence record: ≥3
+ * named participants standing in the same zone together, empty transcript,
+ * synthetic session id. Older records loaded from disk without this field
+ * are treated as `'conversation'`.
+ */
+export type MomentVariant = 'conversation' | 'group';
+
 export type MomentRecord = {
   version: number;
   id: string;
   sessionId: string;
+  /** See `MomentVariant`. Optional on load so pre-TINA-345 records migrate silently. */
+  variant?: MomentVariant;
   /** Deterministic single-sentence label. See `buildMomentHeadline`. */
   headline: string;
   /** Sim clock at capture time. */
@@ -300,7 +352,8 @@ export type MomentRecord = {
   transcript: ConversationTurn[];
   openedAt: SimTime;
   closedAt: SimTime;
-  closeReason: 'drifted' | 'idle' | 'aged';
+  /** `'group'` for TINA-345 co-presence moments; conversation closes use the original trio. */
+  closeReason: 'drifted' | 'idle' | 'aged' | 'group';
   reflection: MomentReflection | null;
 };
 

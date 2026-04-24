@@ -7,6 +7,7 @@ import {
   type MomentReflection,
   type SimTime,
   type WorldClock,
+  buildGroupMomentHeadline,
   buildMomentHeadline,
   deriveWorldClock,
 } from '@tina/shared';
@@ -31,6 +32,18 @@ export interface CapturedClose {
   transcript: ConversationTurn[];
   zone: string | null;
   closeReason: 'drifted' | 'idle' | 'aged';
+}
+
+/**
+ * Group co-presence capture (TINA-345). No transcript — just the participants
+ * who were standing together in the zone. The session id must be unique and
+ * stable (the runtime mints `grp-<tick>-<seq>` ids).
+ */
+export interface CapturedGroup {
+  sessionId: string;
+  simTime: SimTime;
+  participants: MomentParticipant[];
+  zone: string | null;
 }
 
 export interface MomentStoreOptions {
@@ -232,6 +245,7 @@ export class MomentStore {
       version: MOMENT_RECORD_VERSION,
       id,
       sessionId: input.sessionId,
+      variant: 'conversation',
       headline,
       simTime: input.simTime,
       clock,
@@ -253,13 +267,63 @@ export class MomentStore {
   }
 
   /**
+   * Capture a group co-presence moment (TINA-345). Returns the moment id,
+   * stable per sessionId (same create-or-retrieve semantics as `captureClose`).
+   * Writes to disk fire-and-forget.
+   */
+  captureGroup(input: CapturedGroup, clock: WorldClock): MomentRecord {
+    const existingId = this.bySession.get(input.sessionId);
+    if (existingId) {
+      const existing = this.byId.get(existingId);
+      if (existing) return existing;
+    }
+
+    const id = this.idGenerator();
+    const headline = buildGroupMomentHeadline({
+      participants: input.participants,
+      zone: input.zone,
+      clock: { hour: clock.hour, minute: clock.minute },
+    });
+    const record: MomentRecord = {
+      version: MOMENT_RECORD_VERSION,
+      id,
+      sessionId: input.sessionId,
+      variant: 'group',
+      headline,
+      simTime: input.simTime,
+      clock,
+      capturedAt: this.now(),
+      zone: input.zone,
+      participants: input.participants,
+      transcript: [],
+      openedAt: input.simTime,
+      closedAt: input.simTime,
+      closeReason: 'group',
+      reflection: null,
+    };
+
+    this.byId.set(id, record);
+    this.bySession.set(input.sessionId, id);
+    this.evictIfOver();
+    this.scheduleFlush();
+    return record;
+  }
+
+  /**
    * Attach a reflection to the most recent moment whose participants include
    * this agent, provided it fired inside the configured window. Returns the
    * moment id it attached to, or null.
+   *
+   * Group-variant moments (TINA-345) are intentionally excluded: the
+   * reflection-within-window heuristic works for a 1:1 close where one
+   * participant's reflection is directly about that conversation, but it
+   * would misattribute co-presence moments that happen to sit next to an
+   * unrelated reflection on a wider-context day.
    */
   attachReflection(input: MomentReflection): string | null {
     let best: MomentRecord | null = null;
     for (const rec of this.byId.values()) {
+      if (rec.variant === 'group') continue;
       if (!rec.participants.some((p) => p.id === input.agentId)) continue;
       const dt = input.simTime - rec.closedAt;
       if (dt < 0 || dt > this.reflectionWindowSim) continue;

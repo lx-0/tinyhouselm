@@ -91,6 +91,15 @@ const RELATIONSHIPS_DIR = isAbsolute(RELATIONSHIPS_DIR_ENV)
   : resolve(process.cwd(), RELATIONSHIPS_DIR_ENV);
 const RELATIONSHIPS_MAX = Number(process.env.RELATIONSHIPS_MAX ?? 200);
 
+// Multi-character group co-presence moments (TINA-345).
+const GROUP_MOMENTS_ENABLED =
+  (process.env.GROUP_MOMENTS_ENABLED ?? 'true').toLowerCase() !== 'false';
+const GROUP_MOMENTS_MIN_PARTICIPANTS = Number(process.env.GROUP_MOMENTS_MIN_PARTICIPANTS ?? 3);
+const GROUP_MOMENTS_MIN_CONSECUTIVE_TICKS = Number(
+  process.env.GROUP_MOMENTS_MIN_CONSECUTIVE_TICKS ?? 3,
+);
+const GROUP_MOMENTS_DEDUP_MAX = Number(process.env.GROUP_MOMENTS_DEDUP_MAX ?? 512);
+
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
@@ -291,6 +300,19 @@ async function main(): Promise<void> {
     seed: SEED,
     reflections: reflectionOpts,
     relationships,
+    groupMoments: GROUP_MOMENTS_ENABLED
+      ? {
+          minParticipants: GROUP_MOMENTS_MIN_PARTICIPANTS,
+          minConsecutiveTicks: GROUP_MOMENTS_MIN_CONSECUTIVE_TICKS,
+          maxDedupEntries: GROUP_MOMENTS_DEDUP_MAX,
+        }
+      : false,
+  });
+  log.info('group_moments.ready', {
+    enabled: GROUP_MOMENTS_ENABLED,
+    minParticipants: GROUP_MOMENTS_MIN_PARTICIPANTS,
+    minConsecutiveTicks: GROUP_MOMENTS_MIN_CONSECUTIVE_TICKS,
+    maxDedupEntries: GROUP_MOMENTS_DEDUP_MAX,
   });
 
   log.info('web.personas.loaded', { count: skills.length });
@@ -535,6 +557,29 @@ async function main(): Promise<void> {
           a: event.a,
           b: event.b,
           direction: event.direction,
+        });
+        return;
+      }
+      case 'group_moment': {
+        // TINA-345: mint a group-variant moment record + bump the sticky-metrics
+        // counter. The runtime already pushes a Delta through the world emit,
+        // so the SSE stream carries it to /admin without a second broadcast.
+        if (moments && event.participants.length >= 2) {
+          moments.captureGroup(
+            {
+              sessionId: event.sessionId,
+              simTime: event.simTime,
+              participants: event.participants.map(participantSnap),
+              zone: event.zone,
+            },
+            deriveWorldClock(event.simTime, clock.speed),
+          );
+        }
+        stickyMetrics?.recordGroupMoment();
+        log.info('sim.group_moment', {
+          sessionId: event.sessionId,
+          zone: event.zone,
+          participants: event.participants,
         });
         return;
       }
