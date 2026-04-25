@@ -194,10 +194,40 @@ new_state=$(jq -n \
 echo "$new_state" >"$STATE_FILE"
 
 # Mark the routine's run issue done with a one-line summary, if we know it.
+# Capture this routine's id from the current run issue so the sweeper below
+# can scope itself to siblings only.
+routine_id=""
 if [ -n "${PAPERCLIP_TASK_ID:-}" ]; then
+  task_resp=$(api GET "/api/issues/$PAPERCLIP_TASK_ID")
+  routine_id=$(echo "$task_resp" | jq -r '.originId // empty' 2>/dev/null || echo "")
+
   summary="probe outcome=$outcome codes=$codes_csv failRuns=$new_fail_runs okRuns=$new_ok_runs action=$action"
   done_body=$(jq -n --arg comment "$summary" '{status: "done", comment: $comment}')
   api PATCH "/api/issues/$PAPERCLIP_TASK_ID" -d "$done_body" >/dev/null || true
 fi
 
-echo "uptime-probe: outcome=$outcome codes=$codes_csv failRuns=$new_fail_runs okRuns=$new_ok_runs action=$action"
+# Defensive sweeper (TINA-685 RCA): the platform moves routine_execution issues
+# to `blocked` when continuation retries fail (e.g. Claude rate limit). Once
+# the underlying outage clears, nothing re-tries them — they accumulate as
+# zombies in the CTO inbox. On every healthy tick, cancel any stale `blocked`
+# siblings from this same routine that are older than the soak window. Scoped
+# strictly by originId so we never touch unrelated blocked work.
+sweep_count=0
+if [ "$outcome" = "ok" ] && [ -n "$routine_id" ] && [ -n "${PAPERCLIP_COMPANY_ID:-}" ] && [ -n "${PAPERCLIP_AGENT_ID:-}" ]; then
+  sweep_cutoff_iso=$(date -u -d '30 minutes ago' +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+  blocked_resp=$(api GET "/api/companies/$PAPERCLIP_COMPANY_ID/issues?status=blocked&assigneeAgentId=$PAPERCLIP_AGENT_ID")
+  if [ -n "$sweep_cutoff_iso" ]; then
+    stale_ids=$(echo "$blocked_resp" | jq -r --arg rid "$routine_id" --arg cutoff "$sweep_cutoff_iso" \
+      '(if type=="array" then . else (.issues // .items // []) end)
+       | map(select(.originKind == "routine_execution" and .originId == $rid and .updatedAt < $cutoff))
+       | .[].id' 2>/dev/null || true)
+    for sid in $stale_ids; do
+      [ -z "$sid" ] && continue
+      sweep_body='{"status":"cancelled","comment":"cancelled by uptime-probe sweeper — superseded by healthy probe at '"$now_iso"' (TINA-685)"}'
+      api PATCH "/api/issues/$sid" -d "$sweep_body" >/dev/null || true
+      sweep_count=$((sweep_count + 1))
+    done
+  fi
+fi
+
+echo "uptime-probe: outcome=$outcome codes=$codes_csv failRuns=$new_fail_runs okRuns=$new_ok_runs action=$action sweptStale=$sweep_count"
