@@ -29,6 +29,7 @@ import { MomentRoutes } from './moment-routes.js';
 import { MomentsIndexRoutes } from './moments-index-routes.js';
 import { MomentStore } from './moments.js';
 import { ObservabilityStore } from './observability.js';
+import { OgCache, OgRoutes } from './og-routes.js';
 import { mergeReflectionOptions, resolveReflectionTunables } from './reflection-config.js';
 import {
   type SnapshotScheduler,
@@ -92,6 +93,16 @@ const RELATIONSHIPS_DIR = isAbsolute(RELATIONSHIPS_DIR_ENV)
   ? RELATIONSHIPS_DIR_ENV
   : resolve(process.cwd(), RELATIONSHIPS_DIR_ENV);
 const RELATIONSHIPS_MAX = Number(process.env.RELATIONSHIPS_MAX ?? 200);
+
+// Per-moment OG image rendering + cache (TINA-616).
+const MOMENT_OG_ENABLED = (process.env.MOMENT_OG_ENABLED ?? 'true').toLowerCase() !== 'false';
+const MOMENT_OG_CACHE_DIR_ENV = process.env.MOMENT_OG_CACHE_DIR ?? './data/og-cache';
+const MOMENT_OG_CACHE_DIR = isAbsolute(MOMENT_OG_CACHE_DIR_ENV)
+  ? MOMENT_OG_CACHE_DIR_ENV
+  : resolve(process.cwd(), MOMENT_OG_CACHE_DIR_ENV);
+const MOMENT_OG_CACHE_MAX = Number(process.env.MOMENT_OG_CACHE_MAX ?? 500);
+const MOMENT_OG_PER_IP_PER_MIN = Number(process.env.MOMENT_OG_PER_IP_PER_MIN ?? 60);
+const MOMENT_OG_GLOBAL_PER_MIN = Number(process.env.MOMENT_OG_GLOBAL_PER_MIN ?? 600);
 
 // Multi-character group co-presence moments (TINA-345).
 const GROUP_MOMENTS_ENABLED =
@@ -678,6 +689,41 @@ async function main(): Promise<void> {
       })
     : null;
 
+  // /moment/:id/og.png — pure-Node PNG renderer with disk-backed LRU cache
+  // and per-IP rate limiter (TINA-616).
+  const ogCache =
+    moments && MOMENT_OG_ENABLED
+      ? new OgCache({
+          dir: MOMENT_OG_CACHE_DIR,
+          maxEntries: MOMENT_OG_CACHE_MAX,
+          log: (level, event, fields) => log[level](event, fields),
+        })
+      : null;
+  const ogRoutes =
+    moments && ogCache
+      ? new OgRoutes({
+          store: moments,
+          cache: ogCache,
+          relationships,
+          perIpPerMin: MOMENT_OG_PER_IP_PER_MIN,
+          globalPerMin: MOMENT_OG_GLOBAL_PER_MIN,
+          log: (level, event, fields) => log[level](event, fields),
+          onRender: (id, ip) => {
+            // Prefer the visitor cookie when present (browser-driven render);
+            // fall back to raw IP for crawler bots that don't carry cookies.
+            stickyMetrics?.recordMomentOgRender(id, ip);
+          },
+        })
+      : null;
+  if (ogRoutes) {
+    log.info('og.ready', {
+      dir: MOMENT_OG_CACHE_DIR,
+      max: MOMENT_OG_CACHE_MAX,
+      perIp: MOMENT_OG_PER_IP_PER_MIN,
+      global: MOMENT_OG_GLOBAL_PER_MIN,
+    });
+  }
+
   // Per-character public profile pages (TINA-482). Only wired when the moment
   // store is enabled — without recent moments the page is mostly empty.
   const characterRoutes = moments
@@ -738,6 +784,16 @@ async function main(): Promise<void> {
     if (req.method === 'POST' && url.pathname.startsWith('/api/admin/intervention/')) {
       const handled = await interventionHandlers.tryHandle(req, res, url.pathname);
       if (handled) return;
+    }
+    // OG image route MUST come before the /moment/:id HTML page since the
+    // image path shares the `/moment/` prefix.
+    if (ogRoutes && req.method === 'GET' && url.pathname.startsWith('/moment/')) {
+      const tail = url.pathname.slice('/moment/'.length);
+      if (tail.endsWith('/og.png')) {
+        const id = tail.slice(0, -'/og.png'.length);
+        await ogRoutes.handleOgImage(req, res, id);
+        return;
+      }
     }
     if (momentRoutes) {
       if (req.method === 'GET' && url.pathname.startsWith('/moment/')) {

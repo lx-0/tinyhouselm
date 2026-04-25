@@ -121,6 +121,7 @@ export class MomentRoutes {
     const html = renderMomentHtml(
       rec,
       this.buildCanonicalUrl(canonicalPath ?? `/moment/${id}`),
+      this.buildCanonicalUrl(`/moment/${id}/og.png`),
       arc,
       nudge,
       groupArcs,
@@ -356,6 +357,7 @@ export function buildMomentDescription(rec: MomentRecord, max = 160): string {
 function renderMomentHtml(
   rec: MomentRecord,
   canonical: string,
+  ogImageUrl: string,
   arc: ArcTag | null,
   nudge: NudgeTag | null,
   groupArcs: ArcTag[] = [],
@@ -363,6 +365,7 @@ function renderMomentHtml(
   const title = escapeHtml(rec.headline);
   const description = escapeHtml(buildMomentDescription(rec));
   const canonicalEsc = escapeHtml(canonical);
+  const ogImageEsc = escapeHtml(ogImageUrl);
   const isGroup = rec.variant === 'group';
 
   const participantChips = rec.participants
@@ -419,9 +422,14 @@ function renderMomentHtml(
   <meta property="og:description" content="${description}" />
   <meta property="og:url" content="${canonicalEsc}" />
   <meta property="og:site_name" content="tina" />
-  <meta name="twitter:card" content="summary" />
+  <meta property="og:image" content="${ogImageEsc}" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="${title}" />
   <meta name="twitter:description" content="${description}" />
+  <meta name="twitter:image" content="${ogImageEsc}" />
   <link rel="canonical" href="${canonicalEsc}" />
   <style>
     :root { color-scheme: dark; }

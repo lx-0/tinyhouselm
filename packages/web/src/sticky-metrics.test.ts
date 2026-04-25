@@ -46,6 +46,7 @@ describe('StickyMetrics.recordShare', () => {
       affordanceUses: 0,
       characterProfileViews: 0,
       momentsIndexViews: 0,
+      momentOgRenders: 0,
     });
     expect(r[0]!.date).toBe('2026-04-17');
   });
@@ -479,6 +480,92 @@ describe('StickyMetrics.recordMomentsIndexView (TINA-544)', () => {
     const today = m.rollup(7).at(-1)!;
     expect(today.characterProfileViews).toBe(1);
     expect(today.momentsIndexViews).toBe(0);
+  });
+});
+
+describe('StickyMetrics.recordMomentOgRender (TINA-616)', () => {
+  test('aggregates per-moment dedup into one rollup counter', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordMomentOgRender('mom1', 'twitterbot');
+    m.recordMomentOgRender('mom1', 'twitterbot'); // dedup
+    m.recordMomentOgRender('mom1', 'slackbot');
+    m.recordMomentOgRender('mom2', 'twitterbot'); // different moment, twitterbot counts
+    expect(m.rollup(7).at(-1)!.momentOgRenders).toBe(3);
+  });
+
+  test('different moments dedupe independently', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordMomentOgRender('mom1', 'alice');
+    m.recordMomentOgRender('mom2', 'alice');
+    m.recordMomentOgRender('mom3', 'alice');
+    expect(m.rollup(7).at(-1)!.momentOgRenders).toBe(3);
+  });
+
+  test('caps the per-moment dedup set and floors overflow', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-25T10:00:00Z'),
+      maxMomentVisitorsPerDay: 2,
+    });
+    m.recordMomentOgRender('mom1', 'a');
+    m.recordMomentOgRender('mom1', 'b');
+    m.recordMomentOgRender('mom1', 'c'); // floors
+    m.recordMomentOgRender('mom1', 'd'); // floors
+    expect(m.rollup(7).at(-1)!.momentOgRenders).toBe(4);
+  });
+
+  test('ignores empty moment id or visitor id', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordMomentOgRender('', 'alice');
+    m.recordMomentOgRender('mom1', '');
+    expect(m.rollup(7).at(-1)!.momentOgRenders).toBe(0);
+  });
+
+  test('persists across a load-write-load cycle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-og-'));
+    const ref = { ms: Date.parse('2026-04-25T10:00:00Z') };
+    const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m1.load();
+    m1.recordMomentOgRender('mom1', 'twitterbot');
+    m1.recordMomentOgRender('mom2', 'slackbot');
+    await m1.flush();
+
+    const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m2.load();
+    expect(m2.rollup(7).at(-1)!.momentOgRenders).toBe(2);
+    // Re-asserting the same tuple after reload still dedupes.
+    m2.recordMomentOgRender('mom1', 'twitterbot');
+    expect(m2.rollup(7).at(-1)!.momentOgRenders).toBe(2);
+  });
+
+  test('pre-TINA-616 persisted shape (no momentOgVisitors) loads as 0', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-legacy-og-'));
+    const legacy = {
+      version: 1,
+      days: [
+        {
+          date: '2026-04-25',
+          shares: 0,
+          momentVisitors: [],
+          momentExtraVisits: 0,
+          returns24h: 0,
+          returns7d: 0,
+          nudgesApplied: 0,
+          groupMomentsCreated: 0,
+          affordanceUses: 0,
+          characterProfileVisitors: [],
+          characterProfileExtraViews: 0,
+          momentsIndexVisitors: [],
+          momentsIndexExtraViews: 0,
+        },
+      ],
+      visitors: [],
+    };
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(join(dir, STICKY_METRICS_FILE), `${JSON.stringify(legacy)}\n`, 'utf8');
+    const m = new StickyMetrics({ dir, now: clockAt('2026-04-25T10:00:00Z') });
+    await m.load();
+    const today = m.rollup(7).at(-1)!;
+    expect(today.momentOgRenders).toBe(0);
   });
 });
 

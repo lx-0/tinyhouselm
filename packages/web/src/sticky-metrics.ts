@@ -101,6 +101,16 @@ interface DayState {
   momentsIndexVisitors: Map<string, Set<string>>;
   /** Floor counter once a per-filter-key dedup set hits its cap. */
   momentsIndexExtraViews: number;
+  /**
+   * Per-moment dedup sets for the OG image route (TINA-616). Keyed by
+   * moment id; each set holds visitor ids (or raw IPs for crawler bots
+   * that don't carry the cookie) that already counted toward the
+   * aggregate `momentOgRenders` counter for this day. Past the per-id
+   * cap the dedup set stops growing and the floor counter climbs.
+   */
+  momentOgVisitors: Map<string, Set<string>>;
+  /** Floor counter once a per-moment dedup set hits its cap. */
+  momentOgExtraRenders: number;
 }
 
 interface VisitorState {
@@ -129,6 +139,9 @@ interface PersistedDay {
   /** Absent on payloads written before TINA-544; loaded as empty + 0. */
   momentsIndexVisitors?: Array<{ key: string; visitors: string[] }>;
   momentsIndexExtraViews?: number;
+  /** Absent on payloads written before TINA-616; loaded as empty + 0. */
+  momentOgVisitors?: Array<{ id: string; visitors: string[] }>;
+  momentOgExtraRenders?: number;
 }
 
 interface PersistedVisitor {
@@ -166,6 +179,12 @@ export interface DailyRollup {
    * count as separate buckets — refreshing the same view twice counts once.
    */
   momentsIndexViews: number;
+  /**
+   * `/moment/:id/og.png` renders this day (TINA-616), deduped per (moment,
+   * IP-or-visitor). Mostly bumped by social-media crawlers — Twitterbot,
+   * Slackbot, Discord, iMessage — but also counts genuine link previews.
+   */
+  momentOgRenders: number;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -288,6 +307,14 @@ export class StickyMetrics {
           momentsIndexVisitors.set(row.key, set);
         }
       }
+      const momentOgVisitors = new Map<string, Set<string>>();
+      if (Array.isArray(d.momentOgVisitors)) {
+        for (const row of d.momentOgVisitors) {
+          if (!row || typeof row.id !== 'string') continue;
+          const set = new Set<string>(Array.isArray(row.visitors) ? row.visitors : []);
+          momentOgVisitors.set(row.id, set);
+        }
+      }
       this.days.set(d.date, {
         date: d.date,
         shares: Number(d.shares) || 0,
@@ -302,6 +329,8 @@ export class StickyMetrics {
         characterProfileExtraViews: Number(d.characterProfileExtraViews) || 0,
         momentsIndexVisitors,
         momentsIndexExtraViews: Number(d.momentsIndexExtraViews) || 0,
+        momentOgVisitors,
+        momentOgExtraRenders: Number(d.momentOgExtraRenders) || 0,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -397,6 +426,31 @@ export class StickyMetrics {
   }
 
   /**
+   * Record a render of `/moment/:id/og.png` (TINA-616). Deduped per
+   * (moment, visitor-or-IP) per UTC day. Most fetches are social-media
+   * crawlers that don't carry our `tvid` cookie, so the caller passes a
+   * stable identifier (visitor cookie when available, raw IP otherwise).
+   * Past the per-id cap the dedup set stops growing and the floor counter
+   * climbs, mirroring `recordCharacterProfileView`.
+   */
+  recordMomentOgRender(momentId: string, visitorOrIp: string): void {
+    if (!momentId || !visitorOrIp) return;
+    const day = this.day(dayKeyUtc(this.now()));
+    let set = day.momentOgVisitors.get(momentId);
+    if (!set) {
+      set = new Set<string>();
+      day.momentOgVisitors.set(momentId, set);
+    }
+    if (set.has(visitorOrIp)) return;
+    if (set.size < this.maxMomentVisitorsPerDay) {
+      set.add(visitorOrIp);
+    } else {
+      day.momentOgExtraRenders += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
    * Record a hit on `/moments` (TINA-544). Deduped per (filter-key,
    * visitor) per UTC day. The unfiltered index uses the empty string as
    * its key so it dedupes independently of any filtered combination. Past
@@ -466,6 +520,10 @@ export class StickyMetrics {
       if (d) {
         for (const set of d.momentsIndexVisitors.values()) momentsIndexViews += set.size;
       }
+      let momentOgRenders = d?.momentOgExtraRenders ?? 0;
+      if (d) {
+        for (const set of d.momentOgVisitors.values()) momentOgRenders += set.size;
+      }
       out.push({
         date,
         sharesCreated: d?.shares ?? 0,
@@ -477,6 +535,7 @@ export class StickyMetrics {
         affordanceUses: d?.affordanceUses ?? 0,
         characterProfileViews: charViews,
         momentsIndexViews,
+        momentOgRenders,
       });
     }
     return out;
@@ -517,6 +576,8 @@ export class StickyMetrics {
         characterProfileExtraViews: 0,
         momentsIndexVisitors: new Map(),
         momentsIndexExtraViews: 0,
+        momentOgVisitors: new Map(),
+        momentOgExtraRenders: 0,
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -615,6 +676,11 @@ export class StickyMetrics {
           visitors: [...set],
         })),
         momentsIndexExtraViews: d.momentsIndexExtraViews,
+        momentOgVisitors: [...d.momentOgVisitors.entries()].map(([id, set]) => ({
+          id,
+          visitors: [...set],
+        })),
+        momentOgExtraRenders: d.momentOgExtraRenders,
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,

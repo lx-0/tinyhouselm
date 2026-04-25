@@ -151,6 +151,28 @@ describe('MomentRoutes.handleMomentPage', () => {
     expect(res.body).toContain('Mei');
   });
 
+  test('emits og:image + twitter:card=summary_large_image meta (TINA-616)', () => {
+    const { store, record } = mkStore();
+    const routes = new MomentRoutes({
+      store,
+      publicBaseUrl: 'https://tinyhouse.up.railway.app',
+      checkAdmin: alwaysOk,
+    });
+    const res = mockRes();
+    routes.handleMomentPage(res, record.id);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain(
+      `og:image" content="https://tinyhouse.up.railway.app/moment/${record.id}/og.png"`,
+    );
+    expect(res.body).toContain('og:image:width" content="1200"');
+    expect(res.body).toContain('og:image:height" content="630"');
+    expect(res.body).toContain('og:image:type" content="image/png"');
+    expect(res.body).toContain('twitter:card" content="summary_large_image"');
+    expect(res.body).toContain(
+      `twitter:image" content="https://tinyhouse.up.railway.app/moment/${record.id}/og.png"`,
+    );
+  });
+
   test('escapes user-controlled text to prevent XSS', () => {
     const store = new MomentStore({
       maxMoments: 10,
