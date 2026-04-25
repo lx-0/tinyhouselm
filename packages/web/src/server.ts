@@ -23,6 +23,7 @@ import {
 import { build as esbuild } from 'esbuild';
 import { createBudget, resolveBudgetCap } from './budget.js';
 import { CharacterRoutes } from './character-routes.js';
+import { DigestRoutes } from './digest-routes.js';
 import { InterventionHandlers } from './intervention.js';
 import { log } from './logger.js';
 import { MomentRoutes } from './moment-routes.js';
@@ -103,6 +104,14 @@ const MOMENT_OG_CACHE_DIR = isAbsolute(MOMENT_OG_CACHE_DIR_ENV)
 const MOMENT_OG_CACHE_MAX = Number(process.env.MOMENT_OG_CACHE_MAX ?? 500);
 const MOMENT_OG_PER_IP_PER_MIN = Number(process.env.MOMENT_OG_PER_IP_PER_MIN ?? 60);
 const MOMENT_OG_GLOBAL_PER_MIN = Number(process.env.MOMENT_OG_GLOBAL_PER_MIN ?? 600);
+
+// Daily moment digest (TINA-684). Disk-LRU shape mirrors the per-moment OG
+// cache; sized lower by default since one digest = one sim-day.
+const DIGEST_OG_CACHE_DIR_ENV = process.env.DIGEST_OG_CACHE_DIR ?? './data/digest-og-cache';
+const DIGEST_OG_CACHE_DIR = isAbsolute(DIGEST_OG_CACHE_DIR_ENV)
+  ? DIGEST_OG_CACHE_DIR_ENV
+  : resolve(process.cwd(), DIGEST_OG_CACHE_DIR_ENV);
+const DIGEST_OG_LRU_SIZE = Number(process.env.DIGEST_OG_LRU_SIZE ?? 500);
 
 // Multi-character group co-presence moments (TINA-345).
 const GROUP_MOMENTS_ENABLED =
@@ -750,6 +759,41 @@ async function main(): Promise<void> {
       })
     : null;
 
+  // Daily moment digest (TINA-684). Aggregates the day's top N moments at
+  // request time from the live MomentRecord LRU + RelationshipStore — no
+  // new persistence. OG image cached in its own disk-LRU keyed by sim-day.
+  const digestOgCache = moments
+    ? new OgCache({
+        dir: DIGEST_OG_CACHE_DIR,
+        maxEntries: DIGEST_OG_LRU_SIZE,
+        log: (level, event, fields) => log[level](event, fields),
+      })
+    : null;
+  const digestRoutes =
+    moments && digestOgCache
+      ? new DigestRoutes({
+          store: moments,
+          cache: digestOgCache,
+          relationships,
+          isSessionNudged,
+          publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+          simSpeed: clock.speed,
+          currentSimTime: () => world.simTime,
+          log: (level, event, fields) => log[level](event, fields),
+          onOgRender: (canonicalDate, ip) => {
+            // Crawler-friendly: visitor cookie is rarely present on bot
+            // fetches, so the IP fallback mirrors `momentOgRenders`.
+            stickyMetrics?.recordDigestOgRender(canonicalDate, ip);
+          },
+        })
+      : null;
+  if (digestRoutes) {
+    log.info('digest.ready', {
+      dir: DIGEST_OG_CACHE_DIR,
+      ogLruSize: DIGEST_OG_LRU_SIZE,
+    });
+  }
+
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
       res.writeHead(400);
@@ -814,6 +858,25 @@ async function main(): Promise<void> {
         await momentRoutes.handleShare(req, res);
         return;
       }
+    }
+    // Digest OG image MUST come before the /digest/:date HTML page since the
+    // image path shares the `/digest/` prefix.
+    if (digestRoutes && req.method === 'GET' && url.pathname.startsWith('/digest/')) {
+      const tail = url.pathname.slice('/digest/'.length);
+      if (tail.endsWith('/og.png')) {
+        const rawDate = tail.slice(0, -'/og.png'.length);
+        await digestRoutes.handleDigestOgImage(req, res, rawDate);
+        return;
+      }
+      const rawDate = tail.replace(/\/$/, '');
+      // Stamp the visitor cookie up-front so dedup works on first hit.
+      // Counter bump only on a 200 — rate-limited or 404 hits stay out.
+      const visitorId = stickyMetrics ? resolveVisitor(req, res) : null;
+      const outcome = digestRoutes.handleDigestPage(req, res, rawDate);
+      if (outcome.status === 200 && stickyMetrics && visitorId && outcome.canonicalDate) {
+        stickyMetrics.recordDigestView(outcome.canonicalDate, visitorId);
+      }
+      return;
     }
     if (
       momentsIndexRoutes &&

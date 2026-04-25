@@ -518,3 +518,123 @@ export function composeMomentOg(rec: MomentRecord, opts: ComposeMomentOgOptions 
 
   return encodePng(OG_WIDTH, OG_HEIGHT, c.buf);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Daily digest OG composition (TINA-684)                                      */
+/* -------------------------------------------------------------------------- */
+
+export interface DigestOgInput {
+  /** 0-indexed sim-day. */
+  day: number;
+  /** Page headline — e.g. "TINA — Sim-Day 12: Mei and Hiro talked in the cafe at 3:14pm". */
+  headline: string;
+  /** Distinct participants, ordered. Stacked into 2 rows. */
+  participants: Array<{ name: string; named: boolean; color: string | null }>;
+  /** How many moments the digest aggregated — surfaced as a small subtitle chip. */
+  momentsCount: number;
+}
+
+/**
+ * Compose a 1200×630 PNG card for a digest. Reuses the moment card chrome
+ * (panels + accent palette) but swaps in a `DIGEST · SIM-DAY {N}` header and
+ * a 2-row stacked participant glyph block. Deterministic — same input
+ * produces identical bytes, which is what the OG cache key relies on.
+ */
+export function composeDigestOg(input: DigestOgInput): Buffer {
+  const c = new PixelCanvas(OG_WIDTH, OG_HEIGHT);
+  c.fill(BG);
+
+  // Header bar.
+  c.fillRect(0, 0, OG_WIDTH, 80, PANEL);
+  c.drawText(48, 32, `DIGEST · SIM-DAY ${input.day}`, ACCENT, 4);
+  const subtitle = normalizeForFont(`${input.momentsCount} MOMENTS`);
+  const subtitleWidth = measureText(subtitle, 3);
+  c.drawText(OG_WIDTH - subtitleWidth - 48, 36, subtitle, MUTED, 3);
+
+  // Footer bar + branding.
+  c.fillRect(0, OG_HEIGHT - 80, OG_WIDTH, 80, PANEL);
+  c.drawText(48, OG_HEIGHT - 50, 'TINA · TINYHOUSE', ACCENT, 3);
+  const dateBadge = normalizeForFont(`SD-${input.day}`);
+  const dateBadgeWidth = measureText(dateBadge, 3);
+  c.drawText(OG_WIDTH - dateBadgeWidth - 48, OG_HEIGHT - 50, dateBadge, MUTED, 3);
+
+  // 2-row stacked participant glyphs. Cap at 12 (6 per row) to keep the
+  // layout legible at 1200×630 — extras roll off the right with a "+N" pill
+  // beneath the second row.
+  const parts = input.participants.slice(0, 12);
+  const overflow = Math.max(0, input.participants.length - parts.length);
+  const perRow = Math.ceil(parts.length / 2) || 1;
+  const row1 = parts.slice(0, perRow);
+  const row2 = parts.slice(perRow);
+  const glyphRadius = 36;
+  const haloRadius = glyphRadius + 8;
+  const glyphSpacing = 150;
+  const rowGap = 110;
+  const rowYTop = 180;
+
+  drawDigestGlyphRow(c, row1, rowYTop, glyphRadius, haloRadius, glyphSpacing);
+  if (row2.length > 0) {
+    drawDigestGlyphRow(c, row2, rowYTop + rowGap, glyphRadius, haloRadius, glyphSpacing);
+  }
+
+  if (overflow > 0) {
+    const pill = normalizeForFont(`+${overflow} MORE`);
+    const w = measureText(pill, 3);
+    c.drawText(Math.floor((OG_WIDTH - w) / 2), rowYTop + 2 * rowGap + 4, pill, MUTED, 3);
+  }
+
+  // Headline — center, wraps to up to 2 lines, scale 4 (one notch smaller
+  // than the moment OG so the digest title has room next to two glyph rows).
+  const headline = normalizeForFont(input.headline.toUpperCase());
+  const headlineScale = 4;
+  const headlineLineHeight = FONT_HEIGHT * headlineScale + 12;
+  const headlineMaxPx = OG_WIDTH - 96;
+  const lines = wrapText(headline, headlineMaxPx, headlineScale, 2);
+  const headlineBlockHeight = lines.length * headlineLineHeight - 12;
+  const headlineY = OG_HEIGHT - 80 - 40 - headlineBlockHeight;
+  for (let i = 0; i < lines.length; i++) {
+    const lineW = measureText(lines[i]!, headlineScale);
+    c.drawText(
+      Math.floor((OG_WIDTH - lineW) / 2),
+      headlineY + i * headlineLineHeight,
+      lines[i]!,
+      FG,
+      headlineScale,
+    );
+  }
+
+  return encodePng(OG_WIDTH, OG_HEIGHT, c.buf);
+}
+
+function drawDigestGlyphRow(
+  c: PixelCanvas,
+  row: Array<{ name: string; named: boolean; color: string | null }>,
+  centerY: number,
+  glyphRadius: number,
+  haloRadius: number,
+  glyphSpacing: number,
+): void {
+  if (row.length === 0) return;
+  const totalWidth = row.length * glyphSpacing - (glyphSpacing - 2 * haloRadius);
+  const startX = Math.floor((OG_WIDTH - totalWidth) / 2) + haloRadius;
+  for (let i = 0; i < row.length; i++) {
+    const p = row[i]!;
+    const cx = startX + i * glyphSpacing;
+    const color = participantColor(p.color);
+    if (p.named) {
+      c.strokeCircle(cx, centerY, haloRadius, glyphRadius + 2, HALO);
+    }
+    c.fillCircle(cx, centerY, glyphRadius, color);
+    const initial = (p.name[0] ?? '?').toUpperCase();
+    const initialScale = 4;
+    const initialW = measureText(initial, initialScale);
+    const initialH = FONT_HEIGHT * initialScale;
+    c.drawText(
+      cx - Math.floor(initialW / 2),
+      centerY - Math.floor(initialH / 2),
+      initial,
+      BG,
+      initialScale,
+    );
+  }
+}

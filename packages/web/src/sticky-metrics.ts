@@ -111,6 +111,22 @@ interface DayState {
   momentOgVisitors: Map<string, Set<string>>;
   /** Floor counter once a per-moment dedup set hits its cap. */
   momentOgExtraRenders: number;
+  /**
+   * Per-digest-date dedup sets for `/digest/:date` page hits (TINA-684).
+   * Keyed by canonical digest date (e.g. `sd-12`); each set holds visitor
+   * ids (or raw IPs) that already counted toward `digestViews` this day.
+   */
+  digestVisitors: Map<string, Set<string>>;
+  /** Floor counter once a per-date dedup set hits its cap. */
+  digestExtraViews: number;
+  /**
+   * Per-digest-date dedup sets for `/digest/:date/og.png` renders (TINA-684).
+   * Same shape as `momentOgVisitors` — most fetches are social-media
+   * crawlers without the `tvid` cookie, so the caller passes IP fallback.
+   */
+  digestOgVisitors: Map<string, Set<string>>;
+  /** Floor counter once a per-date dedup set hits its cap. */
+  digestOgExtraRenders: number;
 }
 
 interface VisitorState {
@@ -142,6 +158,12 @@ interface PersistedDay {
   /** Absent on payloads written before TINA-616; loaded as empty + 0. */
   momentOgVisitors?: Array<{ id: string; visitors: string[] }>;
   momentOgExtraRenders?: number;
+  /** Absent on payloads written before TINA-684; loaded as empty + 0. */
+  digestVisitors?: Array<{ date: string; visitors: string[] }>;
+  digestExtraViews?: number;
+  /** Absent on payloads written before TINA-684; loaded as empty + 0. */
+  digestOgVisitors?: Array<{ date: string; visitors: string[] }>;
+  digestOgExtraRenders?: number;
 }
 
 interface PersistedVisitor {
@@ -185,6 +207,18 @@ export interface DailyRollup {
    * Slackbot, Discord, iMessage — but also counts genuine link previews.
    */
   momentOgRenders: number;
+  /**
+   * `/digest/:date` page hits this day (TINA-684), deduped per
+   * (canonical-date, IP-or-visitor). The `today`/`yesterday` aliases
+   * resolve to the canonical `sd-N` key before dedup so two clicks on
+   * "today" only count once even across the alias resolution.
+   */
+  digestViews: number;
+  /**
+   * `/digest/:date/og.png` renders this day (TINA-684), same dedup shape
+   * as `momentOgRenders`.
+   */
+  digestOgRenders: number;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -315,6 +349,22 @@ export class StickyMetrics {
           momentOgVisitors.set(row.id, set);
         }
       }
+      const digestVisitors = new Map<string, Set<string>>();
+      if (Array.isArray(d.digestVisitors)) {
+        for (const row of d.digestVisitors) {
+          if (!row || typeof row.date !== 'string') continue;
+          const set = new Set<string>(Array.isArray(row.visitors) ? row.visitors : []);
+          digestVisitors.set(row.date, set);
+        }
+      }
+      const digestOgVisitors = new Map<string, Set<string>>();
+      if (Array.isArray(d.digestOgVisitors)) {
+        for (const row of d.digestOgVisitors) {
+          if (!row || typeof row.date !== 'string') continue;
+          const set = new Set<string>(Array.isArray(row.visitors) ? row.visitors : []);
+          digestOgVisitors.set(row.date, set);
+        }
+      }
       this.days.set(d.date, {
         date: d.date,
         shares: Number(d.shares) || 0,
@@ -331,6 +381,10 @@ export class StickyMetrics {
         momentsIndexExtraViews: Number(d.momentsIndexExtraViews) || 0,
         momentOgVisitors,
         momentOgExtraRenders: Number(d.momentOgExtraRenders) || 0,
+        digestVisitors,
+        digestExtraViews: Number(d.digestExtraViews) || 0,
+        digestOgVisitors,
+        digestOgExtraRenders: Number(d.digestOgExtraRenders) || 0,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -421,6 +475,51 @@ export class StickyMetrics {
       set.add(visitorId);
     } else {
       day.characterProfileExtraViews += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
+   * Record a hit on `/digest/:date` (TINA-684). Deduped per
+   * (canonical-date, visitor-or-IP) per UTC day. Pass the canonical key
+   * (`sd-N`) — never the raw `today`/`yesterday` aliases — so dedup is
+   * correct across alias resolution. Past the per-date cap the dedup set
+   * stops growing and the floor counter climbs.
+   */
+  recordDigestView(canonicalDate: string, visitorOrIp: string): void {
+    if (!canonicalDate || !visitorOrIp) return;
+    const day = this.day(dayKeyUtc(this.now()));
+    let set = day.digestVisitors.get(canonicalDate);
+    if (!set) {
+      set = new Set<string>();
+      day.digestVisitors.set(canonicalDate, set);
+    }
+    if (set.has(visitorOrIp)) return;
+    if (set.size < this.maxMomentVisitorsPerDay) {
+      set.add(visitorOrIp);
+    } else {
+      day.digestExtraViews += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
+   * Record a render of `/digest/:date/og.png` (TINA-684). Same dedup shape
+   * as `recordMomentOgRender` — keyed on canonical sim-day + visitor/IP.
+   */
+  recordDigestOgRender(canonicalDate: string, visitorOrIp: string): void {
+    if (!canonicalDate || !visitorOrIp) return;
+    const day = this.day(dayKeyUtc(this.now()));
+    let set = day.digestOgVisitors.get(canonicalDate);
+    if (!set) {
+      set = new Set<string>();
+      day.digestOgVisitors.set(canonicalDate, set);
+    }
+    if (set.has(visitorOrIp)) return;
+    if (set.size < this.maxMomentVisitorsPerDay) {
+      set.add(visitorOrIp);
+    } else {
+      day.digestOgExtraRenders += 1;
     }
     this.scheduleFlush();
   }
@@ -524,6 +623,14 @@ export class StickyMetrics {
       if (d) {
         for (const set of d.momentOgVisitors.values()) momentOgRenders += set.size;
       }
+      let digestViews = d?.digestExtraViews ?? 0;
+      if (d) {
+        for (const set of d.digestVisitors.values()) digestViews += set.size;
+      }
+      let digestOgRenders = d?.digestOgExtraRenders ?? 0;
+      if (d) {
+        for (const set of d.digestOgVisitors.values()) digestOgRenders += set.size;
+      }
       out.push({
         date,
         sharesCreated: d?.shares ?? 0,
@@ -536,6 +643,8 @@ export class StickyMetrics {
         characterProfileViews: charViews,
         momentsIndexViews,
         momentOgRenders,
+        digestViews,
+        digestOgRenders,
       });
     }
     return out;
@@ -578,6 +687,10 @@ export class StickyMetrics {
         momentsIndexExtraViews: 0,
         momentOgVisitors: new Map(),
         momentOgExtraRenders: 0,
+        digestVisitors: new Map(),
+        digestExtraViews: 0,
+        digestOgVisitors: new Map(),
+        digestOgExtraRenders: 0,
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -681,6 +794,16 @@ export class StickyMetrics {
           visitors: [...set],
         })),
         momentOgExtraRenders: d.momentOgExtraRenders,
+        digestVisitors: [...d.digestVisitors.entries()].map(([date, set]) => ({
+          date,
+          visitors: [...set],
+        })),
+        digestExtraViews: d.digestExtraViews,
+        digestOgVisitors: [...d.digestOgVisitors.entries()].map(([date, set]) => ({
+          date,
+          visitors: [...set],
+        })),
+        digestOgExtraRenders: d.digestOgExtraRenders,
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,

@@ -151,6 +151,32 @@ describe('MomentRoutes.handleMomentPage', () => {
     expect(res.body).toContain('Mei');
   });
 
+  test("footer links back to the digest for the moment's sim-day (TINA-684)", () => {
+    const store = new MomentStore({ maxMoments: 10, idGenerator: () => 'd684' });
+    // simTime = day 7, hour 4 → simDay() === 7
+    const simTime = 7 * 86400 + 4 * 3600;
+    store.captureClose(
+      {
+        sessionId: 'd684-s',
+        simTime,
+        openedAt: simTime,
+        transcript: [{ speakerId: 'a', text: 'hi', at: simTime }],
+        participants: [
+          { id: 'a', name: 'A', named: true, color: '#ffaaaa' },
+          { id: 'b', name: 'B', named: true, color: '#aaffff' },
+        ],
+        zone: 'cafe',
+        closeReason: 'idle',
+      },
+      deriveWorldClock(simTime, 30),
+    );
+    const routes = new MomentRoutes({ store, checkAdmin: alwaysOk });
+    const res = mockRes();
+    routes.handleMomentPage(res, 'd684');
+    expect(res.body).toContain('/digest/sd-7');
+    expect(res.body).toContain('back to sim-day 7 digest');
+  });
+
   test('emits og:image + twitter:card=summary_large_image meta (TINA-616)', () => {
     const { store, record } = mkStore();
     const routes = new MomentRoutes({

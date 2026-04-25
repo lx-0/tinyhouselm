@@ -50,9 +50,16 @@ Goal: when something memorable happens, a visitor can grab a link that captures 
 - `TINA-482` — **Per-character profile pages. ✅** _(shipped 2026-04-25.)_ Public `/character/:name` page per named persona (case-insensitive resolve by id, display-name slug, or first name). Renders a header with glyph + halo + bio, the authored 24-hour schedule strip, top-4 current arcs from `RelationshipStore`, the last 20 `MomentRecord`s the character participated in (linked to `/moment/:id`, group rows badged), and the last 10 typed-affordance uses from a new per-agent ring buffer in `ObservabilityStore`. OG meta is built from the strongest arc + freshest moment headline. `/admin` named-character cards link to the public profile. Sticky-metrics gains a `characterProfileViews` counter with per-IP per-name dedup and per-day cap floor. Per-IP rate limit on the route. Pure read-side aggregation — no new persistence, no LLM.
 - `TINA-616` — **OG image rendering for `/moment/:id`. ✅** _(shipped 2026-04-25.)_ Pure-Node 1200×630 PNG renderer (no headless browser, no native deps) using a hand-encoded 5×7 bitmap font, fits the pixel-art brand. New `GET /moment/:id/og.png` route with disk-backed LRU cache (default 500, env-tunable) and per-IP + global rate limiter. `/moment/:id` HTML now emits `og:image` + `og:image:width=1200` + `og:image:height=630` + `twitter:card=summary_large_image` + `twitter:image`. New `momentOgRenders` sticky-metrics counter, deduped per (moment id, IP-or-visitor) per UTC day. Card layout: TINA · MOMENT header with sim clock, participant glyphs with gold halos for named characters, deterministic headline (wraps to 2 lines max with ellipsis truncation), variant badge + arc chip in the footer.
 
-### Next unblocked (pick after v0.5 #7)
+### Depth picks (post-v0.5, pre-2026-04-30)
 
-Depth over breadth until TINA-145 has 7 clean days. "Second authored town" is deferred until **2026-04-30** — only pick it if the first town's return-rate holds up. If it's weak, keep compounding depth on the features above.
+While TINA-145 builds toward its earliest clean 7-day read on **2026-04-30**, the CEO momentum routine queues compounding depth features on the share→return loop. The "second authored town" decision waits on that read.
+
+- `TINA-544` — **Moments index `/moments` with character + zone + variant filters. ✅** _(shipped 2026-04-25.)_ Depth #1. Browseable index over the MomentRecord ring, deterministic ordering, no LLM, reuses sticky-metrics counter shape.
+- `TINA-684` — **Daily moment digest `/digest/:date` + OG image. ✅** _(shipped 2026-04-25, depth #2.)_ Per-sim-day aggregation page over MomentRecord + RelationshipStore. Deterministic top-N picker (group variant first, then named-pair arc strength, then freshest, then id), `/digest/today` + `/digest/yesterday` aliases that resolve to canonical `sd-N` keys, OG image via a new `composeDigestOg` reusing the TINA-616 pixel-art renderer (DIGEST · SIM-DAY {N} header, stacked 2-row glyph block), separate disk-LRU OG cache (default 500, env-tunable via `DIGEST_OG_LRU_SIZE`), two new sticky-metrics counters (`digestViews`, `digestOgRenders`) deduped per (canonical-date, IP-or-visitor) per UTC day, `dig` column in /admin sticky panel, "today's digest" link in panel header, "← back to sim-day N digest" link in /moment/:id footer. No new persistence, no LLM, no sim hot-path.
+
+### Next unblocked (pick after current depth queue)
+
+Depth over breadth until TINA-145 has 7 clean days. "Second authored town" is deferred until **2026-04-30** — only pick it if the first town's return-rate holds up. If it's weak, keep compounding depth on the features above. Remaining candidate stack ranking after TINA-684: (a) per-zone "what happened here" page (`/zone/:name`), (b) pair-arc page (`/arc/:nameA-nameB`).
 
 ## Non-goals (explicit)
 
@@ -61,7 +68,7 @@ Depth over breadth until TINA-145 has 7 clean days. "Second authored town" is de
 - Marketplace / user-contributed personas.
 - Monetization.
 
-v0.3 shipped; the forcing function flips to "can a visitor *do* something." Revisit scope after v0.4 ships. v0.4's closer is `TINA-27` (named characters). v0.5's closer is TBD — either "second authored town" (if TINA-145 return-rate data justifies cloning on 2026-04-30) or another depth feature if the first town needs more stickiness.
+v0.3 shipped; the forcing function flips to "can a visitor *do* something." Revisit scope after v0.4 ships. v0.4's closer is `TINA-27` (named characters). v0.5's planned 9-item set is shipped (TINA-29 → TINA-616). The v0.5 closer is TBD — either "second authored town" (if TINA-145 return-rate data on 2026-04-30 justifies cloning) or one more depth feature if the first town needs more stickiness.
 
 ## How this is driven
 

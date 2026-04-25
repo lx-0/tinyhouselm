@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { MomentRecord } from '@tina/shared';
-import type { ArcLabel, NudgeDirection, RelationshipStore } from '@tina/sim';
+import { type ArcLabel, type NudgeDirection, type RelationshipStore, simDay } from '@tina/sim';
 import type { MomentStore } from './moments.js';
 
 export interface MomentRouteOptions {
@@ -486,7 +486,7 @@ function renderMomentHtml(
         : `<div class="transcript">${turnsHtml || '<div class="turn" style="opacity:0.6">(no transcript captured)</div>'}</div>`
     }
     ${reflectionHtml}
-    <footer>moment id · ${escapeHtml(rec.id)}</footer>
+    <footer>moment id · ${escapeHtml(rec.id)} · <a href="/digest/sd-${simDay(rec.simTime)}">← back to sim-day ${simDay(rec.simTime)} digest</a></footer>
   </main>
 </body>
 </html>`;

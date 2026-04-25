@@ -478,6 +478,19 @@
         margin-top: 4px;
         font-family: ui-monospace, Menlo, monospace;
       }
+      .sticky-header-links {
+        font-size: 10px;
+        font-family: ui-monospace, Menlo, monospace;
+        color: #8888aa;
+        display: flex;
+        gap: 10px;
+        margin: 0 0 6px;
+      }
+      .sticky-header-links a {
+        color: #b9b0dc;
+        text-decoration: none;
+      }
+      .sticky-header-links a:hover { text-decoration: underline; }
       .nudge-grid {
         margin-top: 6px;
         border-collapse: collapse;
@@ -559,9 +572,13 @@
           <div class="intervene">
             <fieldset>
               <legend>sticky metrics · 7d</legend>
+              <div class="sticky-header-links">
+                <a href="/digest/today" target="_blank" rel="noopener">today's digest →</a>
+                <a href="/digest/yesterday" target="_blank" rel="noopener">yesterday →</a>
+              </div>
               <div id="sticky-metrics-body" class="status">loading…</div>
               <div class="sticky-footnote">
-                shares · unique /moment visits · 24h + 7d returners · nudges applied (UTC days)
+                shares · unique /moment visits · 24h + 7d returners · nudges applied · digest views (UTC days)
               </div>
             </fieldset>
             <fieldset>
