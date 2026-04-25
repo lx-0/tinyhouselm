@@ -26,6 +26,7 @@ import { CharacterRoutes } from './character-routes.js';
 import { InterventionHandlers } from './intervention.js';
 import { log } from './logger.js';
 import { MomentRoutes } from './moment-routes.js';
+import { MomentsIndexRoutes } from './moments-index-routes.js';
 import { MomentStore } from './moments.js';
 import { ObservabilityStore } from './observability.js';
 import { mergeReflectionOptions, resolveReflectionTunables } from './reflection-config.js';
@@ -690,6 +691,19 @@ async function main(): Promise<void> {
       })
     : null;
 
+  // Paginated moments index (TINA-544). Closes the share loop: a visitor who
+  // landed on `/moment/:id` can now browse "more like this" by character /
+  // zone / variant. Same rate-limit + visitor-stamp shape as `/character/:name`.
+  const momentsIndexRoutes = moments
+    ? new MomentsIndexRoutes({
+        named,
+        moments,
+        relationships,
+        simSpeed: clock.speed,
+        publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+      })
+    : null;
+
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
       res.writeHead(400);
@@ -744,6 +758,21 @@ async function main(): Promise<void> {
         await momentRoutes.handleShare(req, res);
         return;
       }
+    }
+    if (
+      momentsIndexRoutes &&
+      req.method === 'GET' &&
+      (url.pathname === '/moments' || url.pathname === '/moments/')
+    ) {
+      // Stamp the visitor cookie up-front so dedup keys land on first hit.
+      // Counter bump is conditional on a 200 — rate-limited or 400 hits stay
+      // out of the per-filter dedup set.
+      const visitorId = stickyMetrics ? resolveVisitor(req, res) : null;
+      const outcome = momentsIndexRoutes.handleIndexPage(req, res, url.searchParams);
+      if (outcome.status === 200 && stickyMetrics && visitorId && outcome.filterKey !== null) {
+        stickyMetrics.recordMomentsIndexView(outcome.filterKey, visitorId);
+      }
+      return;
     }
     if (characterRoutes && req.method === 'GET' && url.pathname.startsWith('/character/')) {
       const rawName = url.pathname.slice('/character/'.length);

@@ -79,9 +79,28 @@ interface ArcRow {
   lastInteractionSim: SimTime;
 }
 
+/**
+ * Build the case-insensitive name resolver shared by `/character/:name`
+ * (TINA-482) and `/moments?character=` (TINA-544). Maps manifest id, display-
+ * name slug ("Mei Tanaka" → "mei-tanaka"), and first-name to the named
+ * persona. Manifest id wins on collision.
+ */
+export function buildNamedResolver(named: NamedPersona[]): Map<string, NamedPersona> {
+  const byKey = new Map<string, NamedPersona>();
+  for (const persona of named) {
+    const idKey = persona.manifest.id.toLowerCase();
+    byKey.set(idKey, persona);
+    const slug = persona.manifest.name.toLowerCase().replace(/\s+/g, '-');
+    if (!byKey.has(slug)) byKey.set(slug, persona);
+    const first = persona.manifest.name.split(/\s+/, 1)[0]?.toLowerCase();
+    if (first && !byKey.has(first)) byKey.set(first, persona);
+  }
+  return byKey;
+}
+
 export class CharacterRoutes {
   private readonly named: NamedPersona[];
-  private readonly byKey = new Map<string, NamedPersona>();
+  private readonly byKey: Map<string, NamedPersona>;
   private readonly moments: MomentStore;
   private readonly relationships: RelationshipStore | null;
   private readonly observability: ObservabilityStore;
@@ -109,17 +128,7 @@ export class CharacterRoutes {
     this.maxMoments = Math.max(1, opts.maxMoments ?? 20);
     this.maxAffordances = Math.max(1, opts.maxAffordances ?? 10);
     this.topArcs = Math.max(1, opts.topArcs ?? 4);
-    for (const persona of this.named) {
-      const idKey = persona.manifest.id.toLowerCase();
-      this.byKey.set(idKey, persona);
-      // Also resolve by display-name slug ("Mei Tanaka" → "mei-tanaka") and by
-      // first-name (so /character/mei lands on Mei Tanaka without needing the
-      // surname). Manifest id wins on collision.
-      const slug = persona.manifest.name.toLowerCase().replace(/\s+/g, '-');
-      if (!this.byKey.has(slug)) this.byKey.set(slug, persona);
-      const first = persona.manifest.name.split(/\s+/, 1)[0]?.toLowerCase();
-      if (first && !this.byKey.has(first)) this.byKey.set(first, persona);
-    }
+    this.byKey = buildNamedResolver(this.named);
   }
 
   /**

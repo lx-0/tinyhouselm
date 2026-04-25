@@ -597,6 +597,15 @@ function renderAgents(): void {
       link.textContent = a.name;
       link.title = 'open public profile';
       name.appendChild(link);
+      // Quick access to the prefilled `/moments?character=` index (TINA-544).
+      // Same hover affordance as the profile link — admins skim cards looking
+      // for "all moments by this person" without retyping the slug.
+      const momentsLink = document.createElement('a');
+      momentsLink.className = 'moments-link';
+      momentsLink.href = `/moments?character=${encodeURIComponent(a.id)}`;
+      momentsLink.textContent = 'moments →';
+      momentsLink.title = 'all moments featuring this character';
+      name.appendChild(momentsLink);
     } else {
       name.appendChild(document.createTextNode(a.name));
     }
@@ -742,6 +751,7 @@ const objectAffordanceSel = document.getElementById('object-affordance') as HTML
 const objectDropBtn = document.getElementById('object-drop') as HTMLButtonElement;
 const objectStatusEl = document.getElementById('object-status') as HTMLElement;
 const objectListEl = document.getElementById('object-list') as HTMLElement;
+const momentsZoneTilesEl = document.getElementById('moments-zone-tiles') as HTMLElement;
 const adminTokenEl = document.getElementById('admin-token') as HTMLInputElement;
 
 adminTokenEl.value = sessionStorage.getItem('adminToken') ?? '';
@@ -795,7 +805,28 @@ function refreshInterventionControls(): void {
     }
     if (priorZone) sel.value = priorZone;
   }
+  renderMomentsZoneTiles();
   renderObjectList();
+}
+
+/**
+ * Render the per-zone "moments tile" shortcut row (TINA-544). One tile per
+ * known zone — clicking lands the admin on `/moments?zone=<name>` so they
+ * can audit recent activity for that zone in one click.
+ */
+function renderMomentsZoneTiles(): void {
+  if (!momentsZoneTilesEl) return;
+  const frag = document.createDocumentFragment();
+  const sorted = [...state.zones].sort((a, b) => a.name.localeCompare(b.name));
+  for (const z of sorted) {
+    const a = document.createElement('a');
+    a.className = 'moments-tile';
+    a.href = `/moments?zone=${encodeURIComponent(z.name)}`;
+    a.textContent = z.name;
+    a.title = `moments tagged ${z.name}`;
+    frag.appendChild(a);
+  }
+  momentsZoneTilesEl.replaceChildren(frag);
 }
 
 function renderObjectList(): void {

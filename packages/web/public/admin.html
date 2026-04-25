@@ -185,6 +185,52 @@
         color: #f5c97a;
         text-decoration: underline;
       }
+      .agent-card .moments-link {
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 9px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #8888aa;
+        text-decoration: none;
+        margin-left: auto;
+        padding-left: 8px;
+      }
+      .agent-card .moments-link:hover {
+        color: #b9b0dc;
+        text-decoration: underline;
+      }
+      .moments-shortcuts {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      .moments-tiles {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+      .moments-tile {
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 10px;
+        padding: 4px 8px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: #b5b5c5;
+        text-decoration: none;
+      }
+      .moments-tile:hover {
+        background: rgba(185, 176, 220, 0.14);
+        border-color: rgba(185, 176, 220, 0.32);
+        color: #e7e5ee;
+      }
+      .moments-tile.primary {
+        background: rgba(185, 176, 220, 0.12);
+        border-color: rgba(185, 176, 220, 0.28);
+        color: #e7e5ee;
+        align-self: flex-start;
+      }
       .agent-card .bio {
         font-size: 10px;
         color: #c4b992;
@@ -516,6 +562,16 @@
               <div id="sticky-metrics-body" class="status">loading…</div>
               <div class="sticky-footnote">
                 shares · unique /moment visits · 24h + 7d returners · nudges applied (UTC days)
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>moments index</legend>
+              <div class="moments-shortcuts">
+                <a href="/moments" class="moments-tile primary">all moments →</a>
+                <div id="moments-zone-tiles" class="moments-tiles"></div>
+              </div>
+              <div class="sticky-footnote">
+                prefilled `/moments?zone=…` — share-loop return surface (TINA-544)
               </div>
             </fieldset>
             <fieldset>

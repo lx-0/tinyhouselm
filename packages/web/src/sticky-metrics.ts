@@ -91,6 +91,16 @@ interface DayState {
   characterProfileVisitors: Map<string, Set<string>>;
   /** Floor counter once a per-name dedup set hits its cap. */
   characterProfileExtraViews: number;
+  /**
+   * Per-filter-key dedup sets for the /moments index page (TINA-544). Keyed
+   * by the canonical filter string (e.g., `character=mei&variant=group`);
+   * each set holds visitor ids that already counted toward the aggregate
+   * `momentsIndexViews` counter for this day. The unfiltered index is keyed
+   * as the empty string `''`.
+   */
+  momentsIndexVisitors: Map<string, Set<string>>;
+  /** Floor counter once a per-filter-key dedup set hits its cap. */
+  momentsIndexExtraViews: number;
 }
 
 interface VisitorState {
@@ -116,6 +126,9 @@ interface PersistedDay {
   /** Absent on payloads written before TINA-482; loaded as empty + 0. */
   characterProfileVisitors?: Array<{ name: string; visitors: string[] }>;
   characterProfileExtraViews?: number;
+  /** Absent on payloads written before TINA-544; loaded as empty + 0. */
+  momentsIndexVisitors?: Array<{ key: string; visitors: string[] }>;
+  momentsIndexExtraViews?: number;
 }
 
 interface PersistedVisitor {
@@ -147,6 +160,12 @@ export interface DailyRollup {
    * twice; visiting the same page twice counts once.
    */
   characterProfileViews: number;
+  /**
+   * `/moments` index views this day (TINA-544), deduped per (filter-key,
+   * visitor). The unfiltered index and each distinct filter combination
+   * count as separate buckets — refreshing the same view twice counts once.
+   */
+  momentsIndexViews: number;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -261,6 +280,14 @@ export class StickyMetrics {
           charVisitors.set(row.name, set);
         }
       }
+      const momentsIndexVisitors = new Map<string, Set<string>>();
+      if (Array.isArray(d.momentsIndexVisitors)) {
+        for (const row of d.momentsIndexVisitors) {
+          if (!row || typeof row.key !== 'string') continue;
+          const set = new Set<string>(Array.isArray(row.visitors) ? row.visitors : []);
+          momentsIndexVisitors.set(row.key, set);
+        }
+      }
       this.days.set(d.date, {
         date: d.date,
         shares: Number(d.shares) || 0,
@@ -273,6 +300,8 @@ export class StickyMetrics {
         affordanceUses: Number(d.affordanceUses) || 0,
         characterProfileVisitors: charVisitors,
         characterProfileExtraViews: Number(d.characterProfileExtraViews) || 0,
+        momentsIndexVisitors,
+        momentsIndexExtraViews: Number(d.momentsIndexExtraViews) || 0,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -368,6 +397,29 @@ export class StickyMetrics {
   }
 
   /**
+   * Record a hit on `/moments` (TINA-544). Deduped per (filter-key,
+   * visitor) per UTC day. The unfiltered index uses the empty string as
+   * its key so it dedupes independently of any filtered combination. Past
+   * the per-key cap the dedup set stops growing and the floor counter
+   * climbs instead, mirroring `recordCharacterProfileView`.
+   */
+  recordMomentsIndexView(filterKey: string, visitorId: string): void {
+    const day = this.day(dayKeyUtc(this.now()));
+    let set = day.momentsIndexVisitors.get(filterKey);
+    if (!set) {
+      set = new Set<string>();
+      day.momentsIndexVisitors.set(filterKey, set);
+    }
+    if (set.has(visitorId)) return;
+    if (set.size < this.maxMomentVisitorsPerDay) {
+      set.add(visitorId);
+    } else {
+      day.momentsIndexExtraViews += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
    * Record a visit to `/moment/:id`. Dedupes by visitor per-day up to the
    * configured cap; past the cap the counter still climbs so the 7-day
    * rollup stays directionally correct.
@@ -410,6 +462,10 @@ export class StickyMetrics {
       if (d) {
         for (const set of d.characterProfileVisitors.values()) charViews += set.size;
       }
+      let momentsIndexViews = d?.momentsIndexExtraViews ?? 0;
+      if (d) {
+        for (const set of d.momentsIndexVisitors.values()) momentsIndexViews += set.size;
+      }
       out.push({
         date,
         sharesCreated: d?.shares ?? 0,
@@ -420,6 +476,7 @@ export class StickyMetrics {
         groupMomentsCreated: d?.groupMomentsCreated ?? 0,
         affordanceUses: d?.affordanceUses ?? 0,
         characterProfileViews: charViews,
+        momentsIndexViews,
       });
     }
     return out;
@@ -458,6 +515,8 @@ export class StickyMetrics {
         affordanceUses: 0,
         characterProfileVisitors: new Map(),
         characterProfileExtraViews: 0,
+        momentsIndexVisitors: new Map(),
+        momentsIndexExtraViews: 0,
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -551,6 +610,11 @@ export class StickyMetrics {
           visitors: [...set],
         })),
         characterProfileExtraViews: d.characterProfileExtraViews,
+        momentsIndexVisitors: [...d.momentsIndexVisitors.entries()].map(([key, set]) => ({
+          key,
+          visitors: [...set],
+        })),
+        momentsIndexExtraViews: d.momentsIndexExtraViews,
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,

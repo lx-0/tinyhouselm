@@ -45,6 +45,7 @@ describe('StickyMetrics.recordShare', () => {
       groupMomentsCreated: 0,
       affordanceUses: 0,
       characterProfileViews: 0,
+      momentsIndexViews: 0,
     });
     expect(r[0]!.date).toBe('2026-04-17');
   });
@@ -398,6 +399,86 @@ describe('StickyMetrics.recordCharacterProfileView (TINA-482)', () => {
     const today = m.rollup(7).at(-1)!;
     expect(today.affordanceUses).toBe(5);
     expect(today.characterProfileViews).toBe(0);
+  });
+});
+
+describe('StickyMetrics.recordMomentsIndexView (TINA-544)', () => {
+  test('aggregates per-filter-key dedup into one rollup counter', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordMomentsIndexView('', 'alice');
+    m.recordMomentsIndexView('', 'alice'); // dedup — same visitor + same key
+    m.recordMomentsIndexView('', 'bob');
+    m.recordMomentsIndexView('character=mei', 'alice'); // different filter, alice counts
+    m.recordMomentsIndexView('character=mei', 'alice'); // dedup again
+    expect(m.rollup(7).at(-1)!.momentsIndexViews).toBe(3);
+  });
+
+  test('unfiltered and filtered keys dedupe independently', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordMomentsIndexView('', 'alice');
+    m.recordMomentsIndexView('zone=cafe', 'alice');
+    m.recordMomentsIndexView('zone=park', 'alice');
+    expect(m.rollup(7).at(-1)!.momentsIndexViews).toBe(3);
+  });
+
+  test('caps the per-key dedup set and floors overflow', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-25T10:00:00Z'),
+      maxMomentVisitorsPerDay: 2,
+    });
+    m.recordMomentsIndexView('', 'a');
+    m.recordMomentsIndexView('', 'b');
+    m.recordMomentsIndexView('', 'c'); // floors
+    m.recordMomentsIndexView('', 'd');
+    expect(m.rollup(7).at(-1)!.momentsIndexViews).toBe(4);
+  });
+
+  test('persists across a load-write-load cycle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-mi-'));
+    const ref = { ms: Date.parse('2026-04-25T10:00:00Z') };
+    const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m1.load();
+    m1.recordMomentsIndexView('', 'alice');
+    m1.recordMomentsIndexView('character=mei', 'alice');
+    m1.recordMomentsIndexView('character=mei', 'bob');
+    await m1.flush();
+
+    const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m2.load();
+    expect(m2.rollup(7).at(-1)!.momentsIndexViews).toBe(3);
+    // Re-asserting the same (key, visitor) tuple after reload still dedupes.
+    m2.recordMomentsIndexView('character=mei', 'alice');
+    expect(m2.rollup(7).at(-1)!.momentsIndexViews).toBe(3);
+  });
+
+  test('pre-TINA-544 persisted shape (no momentsIndexVisitors) loads as 0', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-legacy-mi-'));
+    const legacy = {
+      version: 1,
+      days: [
+        {
+          date: '2026-04-25',
+          shares: 1,
+          momentVisitors: [],
+          momentExtraVisits: 0,
+          returns24h: 0,
+          returns7d: 0,
+          nudgesApplied: 0,
+          groupMomentsCreated: 0,
+          affordanceUses: 5,
+          characterProfileVisitors: [{ name: 'mei-tanaka', visitors: ['alice'] }],
+          characterProfileExtraViews: 0,
+        },
+      ],
+      visitors: [],
+    };
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(join(dir, STICKY_METRICS_FILE), `${JSON.stringify(legacy)}\n`, 'utf8');
+    const m = new StickyMetrics({ dir, now: clockAt('2026-04-25T10:00:00Z') });
+    await m.load();
+    const today = m.rollup(7).at(-1)!;
+    expect(today.characterProfileViews).toBe(1);
+    expect(today.momentsIndexViews).toBe(0);
   });
 });
 
