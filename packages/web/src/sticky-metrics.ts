@@ -83,6 +83,14 @@ interface DayState {
   groupMomentsCreated: number;
   /** Affordance-object uses bumped this day (TINA-416). */
   affordanceUses: number;
+  /**
+   * Per-character-profile dedup sets (TINA-482). Keyed by lowercased
+   * character id; each set holds visitor ids that already counted toward the
+   * aggregate `characterProfileViews` counter for this day.
+   */
+  characterProfileVisitors: Map<string, Set<string>>;
+  /** Floor counter once a per-name dedup set hits its cap. */
+  characterProfileExtraViews: number;
 }
 
 interface VisitorState {
@@ -105,6 +113,9 @@ interface PersistedDay {
   groupMomentsCreated?: number;
   /** Absent on payloads written before TINA-416; treated as 0 on load. */
   affordanceUses?: number;
+  /** Absent on payloads written before TINA-482; loaded as empty + 0. */
+  characterProfileVisitors?: Array<{ name: string; visitors: string[] }>;
+  characterProfileExtraViews?: number;
 }
 
 interface PersistedVisitor {
@@ -130,6 +141,12 @@ export interface DailyRollup {
   groupMomentsCreated: number;
   /** Affordance-object uses bumped this day (TINA-416). */
   affordanceUses: number;
+  /**
+   * Per-character-profile views this day (TINA-482), deduped per (name,
+   * visitor). Visiting two different /character pages from one IP counts
+   * twice; visiting the same page twice counts once.
+   */
+  characterProfileViews: number;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -236,6 +253,14 @@ export class StickyMetrics {
     }
     for (const d of shape.days ?? []) {
       if (!d || typeof d.date !== 'string') continue;
+      const charVisitors = new Map<string, Set<string>>();
+      if (Array.isArray(d.characterProfileVisitors)) {
+        for (const row of d.characterProfileVisitors) {
+          if (!row || typeof row.name !== 'string') continue;
+          const set = new Set<string>(Array.isArray(row.visitors) ? row.visitors : []);
+          charVisitors.set(row.name, set);
+        }
+      }
       this.days.set(d.date, {
         date: d.date,
         shares: Number(d.shares) || 0,
@@ -246,6 +271,8 @@ export class StickyMetrics {
         nudgesApplied: Number(d.nudgesApplied) || 0,
         groupMomentsCreated: Number(d.groupMomentsCreated) || 0,
         affordanceUses: Number(d.affordanceUses) || 0,
+        characterProfileVisitors: charVisitors,
+        characterProfileExtraViews: Number(d.characterProfileExtraViews) || 0,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -317,6 +344,30 @@ export class StickyMetrics {
   }
 
   /**
+   * Record a hit on `/character/:name` (TINA-482). Deduped per (name,
+   * visitor) per UTC day. Past the per-name cap the dedup set stops growing
+   * but the floor counter still climbs so the rollup stays directionally
+   * correct under sustained traffic.
+   */
+  recordCharacterProfileView(name: string, visitorId: string): void {
+    if (!name) return;
+    const key = name.toLowerCase();
+    const day = this.day(dayKeyUtc(this.now()));
+    let set = day.characterProfileVisitors.get(key);
+    if (!set) {
+      set = new Set<string>();
+      day.characterProfileVisitors.set(key, set);
+    }
+    if (set.has(visitorId)) return;
+    if (set.size < this.maxMomentVisitorsPerDay) {
+      set.add(visitorId);
+    } else {
+      day.characterProfileExtraViews += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
    * Record a visit to `/moment/:id`. Dedupes by visitor per-day up to the
    * configured cap; past the cap the counter still climbs so the 7-day
    * rollup stays directionally correct.
@@ -355,6 +406,10 @@ export class StickyMetrics {
     for (let i = days - 1; i >= 0; i--) {
       const date = addDaysUtc(today, -i);
       const d = this.days.get(date);
+      let charViews = d?.characterProfileExtraViews ?? 0;
+      if (d) {
+        for (const set of d.characterProfileVisitors.values()) charViews += set.size;
+      }
       out.push({
         date,
         sharesCreated: d?.shares ?? 0,
@@ -364,6 +419,7 @@ export class StickyMetrics {
         nudgesApplied: d?.nudgesApplied ?? 0,
         groupMomentsCreated: d?.groupMomentsCreated ?? 0,
         affordanceUses: d?.affordanceUses ?? 0,
+        characterProfileViews: charViews,
       });
     }
     return out;
@@ -400,6 +456,8 @@ export class StickyMetrics {
         nudgesApplied: 0,
         groupMomentsCreated: 0,
         affordanceUses: 0,
+        characterProfileVisitors: new Map(),
+        characterProfileExtraViews: 0,
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -488,6 +546,11 @@ export class StickyMetrics {
         nudgesApplied: d.nudgesApplied,
         groupMomentsCreated: d.groupMomentsCreated,
         affordanceUses: d.affordanceUses,
+        characterProfileVisitors: [...d.characterProfileVisitors.entries()].map(([name, set]) => ({
+          name,
+          visitors: [...set],
+        })),
+        characterProfileExtraViews: d.characterProfileExtraViews,
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,

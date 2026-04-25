@@ -589,8 +589,17 @@ function renderAgents(): void {
       star.title = 'named character';
       star.textContent = '★';
       name.appendChild(star);
+      // Link the displayed name to /character/:id (TINA-482) so admins can
+      // jump to the public profile page without retyping the slug.
+      const link = document.createElement('a');
+      link.className = 'named-link';
+      link.href = `/character/${encodeURIComponent(a.id)}`;
+      link.textContent = a.name;
+      link.title = 'open public profile';
+      name.appendChild(link);
+    } else {
+      name.appendChild(document.createTextNode(a.name));
     }
-    name.appendChild(document.createTextNode(a.name));
     const mood = document.createElement('span');
     mood.className = 'mood';
     mood.textContent = a.mood;

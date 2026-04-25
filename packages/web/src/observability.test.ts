@@ -96,6 +96,40 @@ describe('ObservabilityStore', () => {
     expect(boot.relations[1]!.conversations).toBe(1);
   });
 
+  test('per-agent affordance ring is newest-first and capped (TINA-482)', () => {
+    const store = new ObservabilityStore({ maxAffordancesPerAgent: 3 });
+    for (let i = 0; i < 5; i++) {
+      store.recordAffordanceEvent({
+        agentId: 'mei',
+        agentName: 'Mei',
+        objectId: `obj${i}`,
+        label: `bench ${i}`,
+        affordance: 'sit',
+        zone: 'park',
+        simTime: i,
+      });
+    }
+    const recent = store.recentAffordancesFor('mei', 5);
+    expect(recent.map((e) => e.objectId)).toEqual(['obj4', 'obj3', 'obj2']);
+    expect(store.recentAffordancesFor('hiro', 5)).toEqual([]);
+  });
+
+  test('recentAffordancesFor honors the per-call limit', () => {
+    const store = new ObservabilityStore();
+    for (let i = 0; i < 4; i++) {
+      store.recordAffordanceEvent({
+        agentId: 'mei',
+        agentName: 'Mei',
+        objectId: `obj${i}`,
+        label: 'bench',
+        affordance: 'sit',
+        zone: 'park',
+        simTime: i,
+      });
+    }
+    expect(store.recentAffordancesFor('mei', 2)).toHaveLength(2);
+  });
+
   test('plan events and reflections capped and newest-first', () => {
     const store = new ObservabilityStore({ maxPlanEvents: 2, maxReflections: 2 });
     for (let i = 0; i < 4; i++) {

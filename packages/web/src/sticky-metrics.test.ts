@@ -44,6 +44,7 @@ describe('StickyMetrics.recordShare', () => {
       nudgesApplied: 0,
       groupMomentsCreated: 0,
       affordanceUses: 0,
+      characterProfileViews: 0,
     });
     expect(r[0]!.date).toBe('2026-04-17');
   });
@@ -320,6 +321,83 @@ describe('StickyMetrics.recordAffordanceUse (TINA-416)', () => {
     expect(today.sharesCreated).toBe(2);
     expect(today.groupMomentsCreated).toBe(1);
     expect(today.affordanceUses).toBe(0);
+  });
+});
+
+describe('StickyMetrics.recordCharacterProfileView (TINA-482)', () => {
+  test('aggregates per-name dedup into one rollup counter', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordCharacterProfileView('mei-tanaka', 'alice');
+    m.recordCharacterProfileView('mei-tanaka', 'alice'); // dedup — same visitor, same name
+    m.recordCharacterProfileView('mei-tanaka', 'bob');
+    m.recordCharacterProfileView('hiro-abe', 'alice'); // alice on a different page counts
+    expect(m.rollup(7).at(-1)!.characterProfileViews).toBe(3);
+  });
+
+  test('per-IP per-name dedup is case-insensitive on the name', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordCharacterProfileView('Mei-Tanaka', 'alice');
+    m.recordCharacterProfileView('mei-tanaka', 'alice'); // same dedup bucket
+    m.recordCharacterProfileView('MEI-TANAKA', 'alice');
+    expect(m.rollup(7).at(-1)!.characterProfileViews).toBe(1);
+  });
+
+  test('caps the per-name dedup set and floors overflow', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-25T10:00:00Z'),
+      maxMomentVisitorsPerDay: 2,
+    });
+    m.recordCharacterProfileView('mei-tanaka', 'a');
+    m.recordCharacterProfileView('mei-tanaka', 'b');
+    m.recordCharacterProfileView('mei-tanaka', 'c'); // floors
+    m.recordCharacterProfileView('mei-tanaka', 'd');
+    expect(m.rollup(7).at(-1)!.characterProfileViews).toBe(4);
+  });
+
+  test('persists across a load-write-load cycle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-char-'));
+    const ref = { ms: Date.parse('2026-04-25T10:00:00Z') };
+    const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m1.load();
+    m1.recordCharacterProfileView('mei-tanaka', 'alice');
+    m1.recordCharacterProfileView('mei-tanaka', 'bob');
+    m1.recordCharacterProfileView('hiro-abe', 'alice');
+    await m1.flush();
+
+    const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m2.load();
+    expect(m2.rollup(7).at(-1)!.characterProfileViews).toBe(3);
+    // Re-asserting the same (name, visitor) tuple after reload still dedupes.
+    m2.recordCharacterProfileView('mei-tanaka', 'alice');
+    expect(m2.rollup(7).at(-1)!.characterProfileViews).toBe(3);
+  });
+
+  test('pre-TINA-482 persisted shape (no characterProfileVisitors) loads as 0', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-legacy-char-'));
+    const legacy = {
+      version: 1,
+      days: [
+        {
+          date: '2026-04-25',
+          shares: 1,
+          momentVisitors: [],
+          momentExtraVisits: 0,
+          returns24h: 0,
+          returns7d: 0,
+          nudgesApplied: 0,
+          groupMomentsCreated: 0,
+          affordanceUses: 5,
+        },
+      ],
+      visitors: [],
+    };
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(join(dir, STICKY_METRICS_FILE), `${JSON.stringify(legacy)}\n`, 'utf8');
+    const m = new StickyMetrics({ dir, now: clockAt('2026-04-25T10:00:00Z') });
+    await m.load();
+    const today = m.rollup(7).at(-1)!;
+    expect(today.affordanceUses).toBe(5);
+    expect(today.characterProfileViews).toBe(0);
   });
 });
 

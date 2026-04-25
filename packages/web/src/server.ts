@@ -22,6 +22,7 @@ import {
 } from '@tina/sim';
 import { build as esbuild } from 'esbuild';
 import { createBudget, resolveBudgetCap } from './budget.js';
+import { CharacterRoutes } from './character-routes.js';
 import { InterventionHandlers } from './intervention.js';
 import { log } from './logger.js';
 import { MomentRoutes } from './moment-routes.js';
@@ -564,8 +565,19 @@ async function main(): Promise<void> {
         // TINA-416: a named character reached a typed affordance object.
         // Bump the daily counter; the runtime already broadcasts a Delta on
         // the world emit channel for /admin and /index live displays, so
-        // we only need to record + log here.
+        // we only need to record + log here. Also push into the per-agent
+        // observability ring (TINA-482) so /character/:name can render the
+        // last N uses without a fresh disk read.
         stickyMetrics?.recordAffordanceUse();
+        observability.recordAffordanceEvent({
+          agentId: event.agentId,
+          agentName: event.agentName,
+          objectId: event.objectId,
+          label: event.label,
+          affordance: event.affordance,
+          zone: event.zone,
+          simTime: event.simTime,
+        });
         log.info('sim.object_used', {
           agentId: event.agentId,
           objectId: event.objectId,
@@ -665,6 +677,19 @@ async function main(): Promise<void> {
       })
     : null;
 
+  // Per-character public profile pages (TINA-482). Only wired when the moment
+  // store is enabled — without recent moments the page is mostly empty.
+  const characterRoutes = moments
+    ? new CharacterRoutes({
+        named,
+        moments,
+        relationships,
+        observability,
+        simSpeed: clock.speed,
+        publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+      })
+    : null;
+
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
       res.writeHead(400);
@@ -719,6 +744,18 @@ async function main(): Promise<void> {
         await momentRoutes.handleShare(req, res);
         return;
       }
+    }
+    if (characterRoutes && req.method === 'GET' && url.pathname.startsWith('/character/')) {
+      const rawName = url.pathname.slice('/character/'.length);
+      // Stamp the visitor cookie up-front so dedup works on first hit.
+      // Counter bump is conditional on a successful 200 — we don't want to
+      // count rate-limited or 404 hits toward the per-name dedup set.
+      const visitorId = stickyMetrics ? resolveVisitor(req, res) : null;
+      const outcome = characterRoutes.handleCharacterPage(req, res, rawName, url.pathname);
+      if (outcome.status === 200 && outcome.personaId && stickyMetrics && visitorId) {
+        stickyMetrics.recordCharacterProfileView(outcome.personaId, visitorId);
+      }
+      return;
     }
     if (req.method === 'GET' && url.pathname === '/api/admin/bootstrap') {
       res.writeHead(200, { 'content-type': 'application/json' });

@@ -26,6 +26,8 @@ export type {
   NamedPersonaGlyph,
   NamedPersonaManifest,
   NamedPersonaSeedMemory,
+  ScheduleEntry,
+  ScheduleZone,
 } from './named-personas.js';
 export { ParaMemory, DEFAULT_IMPORTANCE } from './memory.js';
 export type {
