@@ -9,6 +9,16 @@ import {
 } from '@tina/sim';
 import type { MomentStore } from './moments.js';
 import type { ObservabilityAffordanceEvent, ObservabilityStore } from './observability.js';
+import { composeCharacterOg } from './og-image.js';
+import type { OgCache } from './og-routes.js';
+
+export type CharacterLogger = (
+  level: 'info' | 'warn' | 'error',
+  event: string,
+  fields?: Record<string, unknown>,
+) => void;
+
+const noopLog: CharacterLogger = () => {};
 
 export interface CharacterRouteOptions {
   /** Authored named-persona roster — drives /character/:name resolution. */
@@ -37,6 +47,20 @@ export interface CharacterRouteOptions {
   maxAffordances?: number;
   /** Top-N arcs to surface in the header strip. Default 4. */
   topArcs?: number;
+  /**
+   * Disk-backed OG image cache (TINA-882). When provided, the route exposes
+   * `/character/:name/og.png` and references the rendered image from the
+   * HTML page's `og:image` meta. Pass `null`/omit to fall back to the
+   * meta-only behavior shipped with TINA-482.
+   */
+  ogCache?: OgCache | null;
+  /**
+   * Bumped after a 200 OG render — drives `characterOgRenders` sticky metric.
+   * Receives the persona's canonical manifest id and the requesting IP so the
+   * caller can dedup per (id, IP-or-visitor) per UTC day.
+   */
+  onOgRender?: (personaId: string, ip: string) => void;
+  log?: CharacterLogger;
 }
 
 /**
@@ -112,6 +136,9 @@ export class CharacterRoutes {
   private readonly maxMoments: number;
   private readonly maxAffordances: number;
   private readonly topArcs: number;
+  private readonly ogCache: OgCache | null;
+  private readonly onOgRender?: (personaId: string, ip: string) => void;
+  private readonly log: CharacterLogger;
   private readonly perIp = new Map<string, Bucket>();
   private readonly globalBucket: Bucket = { count: 0, windowStart: 0 };
 
@@ -128,7 +155,15 @@ export class CharacterRoutes {
     this.maxMoments = Math.max(1, opts.maxMoments ?? 20);
     this.maxAffordances = Math.max(1, opts.maxAffordances ?? 10);
     this.topArcs = Math.max(1, opts.topArcs ?? 4);
+    this.ogCache = opts.ogCache ?? null;
+    this.onOgRender = opts.onOgRender;
+    this.log = opts.log ?? noopLog;
     this.byKey = buildNamedResolver(this.named);
+  }
+
+  /** Whether the OG image route is wired (TINA-882). */
+  hasOgImage(): boolean {
+    return this.ogCache !== null;
   }
 
   /**
@@ -183,6 +218,9 @@ export class CharacterRoutes {
     );
     const todaysSchedule = this.collectTodaySchedule(persona.scheduleByHour);
     const ogDescription = buildCharacterOgDescription(persona, arcs, recentMoments);
+    const ogImageUrl = this.ogCache
+      ? this.buildCanonicalUrl(`/character/${persona.manifest.id}/og.png`)
+      : null;
     return renderCharacterHtmlBody(persona, {
       canonical,
       arcs,
@@ -191,7 +229,89 @@ export class CharacterRoutes {
       schedule: todaysSchedule,
       simSpeed: this.simSpeed,
       ogDescription,
+      ogImageUrl,
     });
+  }
+
+  /**
+   * GET /character/:name/og.png. Public. 200 PNG on hit, 404 unknown, 429
+   * limited. Shares the per-IP / global limiter with `handleCharacterPage`
+   * so a noisy crawler hammering both routes still gets bounded.
+   */
+  async handleCharacterOgImage(
+    req: IncomingMessage,
+    res: ServerResponse,
+    rawName: string,
+  ): Promise<void> {
+    if (!this.ogCache) {
+      writePlain(res, 404, 'not found');
+      return;
+    }
+    const ip = clientIp(req);
+    const rate = this.checkRate(ip);
+    if (!rate.ok) {
+      res.setHeader('retry-after', String(Math.ceil(rate.retryAfterMs / 1000)));
+      writePlain(res, 429, 'rate limited');
+      return;
+    }
+    const decoded = safeDecode(rawName);
+    if (!decoded || !NAME_PATTERN.test(decoded)) {
+      writePlain(res, 404, 'not found');
+      return;
+    }
+    const persona = this.byKey.get(decoded.toLowerCase());
+    if (!persona) {
+      writePlain(res, 404, 'not found');
+      return;
+    }
+    const canonicalId = persona.manifest.id;
+    const recentMoments = this.collectMoments(canonicalId);
+    const arcs = this.collectArcs(canonicalId);
+    const freshest = recentMoments[0] ?? null;
+    let png: Buffer;
+    let cacheHit = false;
+    const t0 = this.now();
+    const cached = await this.ogCache.get(canonicalId);
+    if (cached) {
+      png = cached;
+      cacheHit = true;
+    } else {
+      png = composeCharacterOg({
+        name: persona.manifest.name,
+        color: persona.manifest.glyph.color,
+        bio: persona.manifest.bio,
+        arc: arcs[0]
+          ? { label: arcs[0].label, otherName: arcs[0].other.name }
+          : null,
+        headline: freshest?.headline ?? '',
+        variant: freshest?.variant ?? null,
+        participantCount: freshest?.participants.length ?? 0,
+      });
+      // Fire-and-forget — never block the response on the cache write.
+      void this.ogCache.set(canonicalId, png).catch((err) => {
+        this.log('warn', 'character.og.cache.set.error', {
+          id: canonicalId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+    res.writeHead(200, {
+      'content-type': 'image/png',
+      'content-length': String(png.length),
+      // Mirrors arc/zone OG: per-character cards drift as new moments land,
+      // a one-minute browser cache is enough to spare crawlers without
+      // freezing stale state.
+      'cache-control': 'public, max-age=60',
+      'x-og-cache': cacheHit ? 'hit' : 'miss',
+    });
+    res.end(png);
+    this.log('info', 'character.og.render', {
+      id: canonicalId,
+      cacheHit,
+      bytes: png.length,
+      ms: this.now() - t0,
+    });
+    this.onOgRender?.(canonicalId, ip);
   }
 
   private buildCanonicalUrl(path: string): string {
@@ -297,6 +417,11 @@ function writeHtml(res: ServerResponse, status: number, body: string): void {
   res.end(body);
 }
 
+function writePlain(res: ServerResponse, status: number, body: string): void {
+  res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
+  res.end(body);
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -368,6 +493,12 @@ interface RenderInput {
   schedule: ScheduleEntry[];
   simSpeed: number;
   ogDescription: string;
+  /**
+   * Absolute (or relative-fallback) URL for the per-character OG PNG. When
+   * null the page falls back to the TINA-482 meta-only behavior — `og:type`
+   * + description but no `og:image` tags. Set when TINA-882 is enabled.
+   */
+  ogImageUrl: string | null;
 }
 
 function renderCharacterHtmlBody(persona: NamedPersona, input: RenderInput): string {
@@ -392,6 +523,20 @@ function renderCharacterHtmlBody(persona: NamedPersona, input: RenderInput): str
   const momentsHtml = renderMomentsList(persona.manifest.id, input.moments, input.simSpeed);
   const affordancesHtml = renderAffordancesList(input.affordances, input.simSpeed);
 
+  // TINA-882: when an OG image URL is wired, emit the og:image / twitter:image
+  // tag set and switch the twitter card to summary_large_image. Otherwise we
+  // fall back to TINA-482's meta-only behavior so the page still scores a
+  // useful preview in unfurlers that handle text-only cards.
+  const ogImageUrl = input.ogImageUrl ? escapeHtml(input.ogImageUrl) : null;
+  const ogImageMeta = ogImageUrl
+    ? `<meta property="og:image" content="${ogImageUrl}" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta name="twitter:image" content="${ogImageUrl}" />`
+    : '';
+  const twitterCard = ogImageUrl ? 'summary_large_image' : 'summary';
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -403,7 +548,8 @@ function renderCharacterHtmlBody(persona: NamedPersona, input: RenderInput): str
   <meta property="og:description" content="${description}" />
   <meta property="og:url" content="${canonical}" />
   <meta property="og:site_name" content="tinyhouse" />
-  <meta name="twitter:card" content="summary" />
+  ${ogImageMeta}
+  <meta name="twitter:card" content="${twitterCard}" />
   <meta name="twitter:title" content="${escapeHtml(m.name)} — Tinyhouse" />
   <meta name="twitter:description" content="${description}" />
   <link rel="canonical" href="${canonical}" />

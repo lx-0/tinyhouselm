@@ -853,3 +853,136 @@ function formatAffinityForOg(a: number): string {
   const abs = Math.abs(clamped).toFixed(2);
   return `AFFINITY ${sign}${abs}`;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Per-character OG composition (TINA-882)                                    */
+/* -------------------------------------------------------------------------- */
+
+export interface CharacterOgInput {
+  /** Display name. Big bitmap text up top. */
+  name: string;
+  /** Body color hex for the centered glyph. Falls back to lavender. */
+  color: string | null;
+  /** Bio line — single-line truncated, drawn small under the name. */
+  bio: string;
+  /**
+   * Strongest current arc, or null when none have formed yet. Surfaced as a
+   * gold chip with `<arc> WITH <name>` on the right side of the header.
+   */
+  arc: { label: string; otherName: string } | null;
+  /**
+   * Freshest moment headline, or empty string for the quiet fallback. Wraps
+   * to 2 lines max with ellipsis truncation.
+   */
+  headline: string;
+  /**
+   * Variant of the freshest moment, when there is one. `'group'` swaps the
+   * footer chip from `CONVERSATION` to `GROUP · N`.
+   */
+  variant?: 'conversation' | 'group' | null;
+  /** Group size for the footer badge when variant is `group`. */
+  participantCount?: number;
+}
+
+/**
+ * Compose a 1200×630 PNG card for a named character. Reuses the moment/zone/
+ * arc chrome (panel bars + accent palette) but swaps in a `TINA · CHARACTER`
+ * header, the persona name as the visual anchor, a single-line bio, the
+ * strongest current arc as a gold chip, and the freshest moment headline as
+ * the footer body. Deterministic — same input produces identical bytes,
+ * which is what the OG cache key relies on.
+ */
+export function composeCharacterOg(input: CharacterOgInput): Buffer {
+  const c = new PixelCanvas(OG_WIDTH, OG_HEIGHT);
+  c.fill(BG);
+
+  // Header bar.
+  c.fillRect(0, 0, OG_WIDTH, 80, PANEL);
+  c.drawText(48, 32, 'TINA · CHARACTER', ACCENT, 4);
+  if (input.arc) {
+    const chip = normalizeForFont(
+      `${input.arc.label} WITH ${input.arc.otherName}`.toUpperCase(),
+    );
+    const chipW = measureText(chip, 3);
+    c.drawText(OG_WIDTH - chipW - 48, 36, chip, HALO, 3);
+  }
+
+  // Footer bar + branding.
+  c.fillRect(0, OG_HEIGHT - 80, OG_WIDTH, 80, PANEL);
+  c.drawText(48, OG_HEIGHT - 50, 'TINA · TINYHOUSE', ACCENT, 3);
+  const footerBadge = footerBadgeFor(input.variant ?? null, input.participantCount ?? 0);
+  const badgeW = measureText(footerBadge, 3);
+  c.drawText(OG_WIDTH - badgeW - 48, OG_HEIGHT - 50, footerBadge, MUTED, 3);
+
+  // Centered glyph with halo — the character is always "named" on this page.
+  const glyphRadius = 70;
+  const haloRadius = glyphRadius + 12;
+  const glyphCx = Math.floor(OG_WIDTH / 2);
+  const glyphCy = 200;
+  const glyphColor = participantColor(input.color);
+  c.strokeCircle(glyphCx, glyphCy, haloRadius, glyphRadius + 2, HALO);
+  c.fillCircle(glyphCx, glyphCy, glyphRadius, glyphColor);
+  const initial = (input.name[0] ?? '?').toUpperCase();
+  const initialScale = 8;
+  const initialW = measureText(initial, initialScale);
+  const initialH = FONT_HEIGHT * initialScale;
+  c.drawText(
+    glyphCx - Math.floor(initialW / 2),
+    glyphCy - Math.floor(initialH / 2),
+    initial,
+    BG,
+    initialScale,
+  );
+
+  // Big name centered below the glyph. Scales down once if it would clip.
+  const nameRaw = normalizeForFont(input.name.toUpperCase());
+  const nameMaxPx = OG_WIDTH - 96;
+  const nameScale = measureText(nameRaw, 7) <= nameMaxPx ? 7 : 5;
+  const nameW = measureText(nameRaw, nameScale);
+  const nameY = glyphCy + haloRadius + 28;
+  c.drawText(Math.floor((OG_WIDTH - nameW) / 2), nameY, nameRaw, FG, nameScale);
+
+  // Single-line bio under the name — truncated to fit.
+  const bioRaw = normalizeForFont(input.bio.toUpperCase());
+  if (bioRaw.length > 0) {
+    const bioScale = 3;
+    const bioMaxPx = OG_WIDTH - 96;
+    const bioLines = wrapText(bioRaw, bioMaxPx, bioScale, 1);
+    if (bioLines.length > 0) {
+      const bioY = nameY + FONT_HEIGHT * nameScale + 24;
+      const lineW = measureText(bioLines[0]!, bioScale);
+      c.drawText(Math.floor((OG_WIDTH - lineW) / 2), bioY, bioLines[0]!, MUTED, bioScale);
+    }
+  }
+
+  // Headline above the footer — wraps to 2 lines, scale 4 to match arc/zone.
+  const headlineSource = input.headline.trim() || `${input.name} is having a quiet moment`;
+  const headline = normalizeForFont(headlineSource.toUpperCase());
+  const headlineScale = 4;
+  const headlineLineHeight = FONT_HEIGHT * headlineScale + 12;
+  const headlineMaxPx = OG_WIDTH - 96;
+  const lines = wrapText(headline, headlineMaxPx, headlineScale, 2);
+  const headlineBlockHeight = lines.length * headlineLineHeight - 12;
+  const headlineY = OG_HEIGHT - 80 - 32 - headlineBlockHeight;
+  for (let i = 0; i < lines.length; i++) {
+    const lineW = measureText(lines[i]!, headlineScale);
+    c.drawText(
+      Math.floor((OG_WIDTH - lineW) / 2),
+      headlineY + i * headlineLineHeight,
+      lines[i]!,
+      FG,
+      headlineScale,
+    );
+  }
+
+  return encodePng(OG_WIDTH, OG_HEIGHT, c.buf);
+}
+
+function footerBadgeFor(
+  variant: 'conversation' | 'group' | null,
+  participantCount: number,
+): string {
+  if (variant === 'group' && participantCount > 0) return `GROUP · ${participantCount}`;
+  if (variant === 'conversation') return 'CONVERSATION';
+  return 'CHARACTER';
+}

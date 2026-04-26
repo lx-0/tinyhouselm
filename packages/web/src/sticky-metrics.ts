@@ -161,6 +161,15 @@ interface DayState {
   arcOgVisitors: Map<string, Set<string>>;
   /** Floor counter once a per-pair dedup set hits its cap. */
   arcOgExtraRenders: number;
+  /**
+   * Per-character-id dedup sets for `/character/:name/og.png` renders
+   * (TINA-882). Keyed on the canonical persona manifest id so dedup is
+   * stable across slug variants (`mei-tanaka`, `mei`, etc). Same fallback
+   * shape as `arcOgVisitors`.
+   */
+  characterOgVisitors: Map<string, Set<string>>;
+  /** Floor counter once a per-character dedup set hits its cap. */
+  characterOgExtraRenders: number;
 }
 
 interface VisitorState {
@@ -210,6 +219,9 @@ interface PersistedDay {
   /** Absent on payloads written before TINA-813; loaded as empty + 0. */
   arcOgVisitors?: Array<{ slug: string; visitors: string[] }>;
   arcOgExtraRenders?: number;
+  /** Absent on payloads written before TINA-882; loaded as empty + 0. */
+  characterOgVisitors?: Array<{ id: string; visitors: string[] }>;
+  characterOgExtraRenders?: number;
 }
 
 interface PersistedVisitor {
@@ -286,6 +298,12 @@ export interface DailyRollup {
    * `momentOgRenders`. Mostly bumped by social-media crawlers.
    */
   arcOgRenders: number;
+  /**
+   * `/character/:name/og.png` renders this day (TINA-882), deduped per
+   * (canonical-character-id, IP-or-visitor). Multiple characters from one
+   * IP each count once per day.
+   */
+  characterOgRenders: number;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -464,6 +482,14 @@ export class StickyMetrics {
           arcOgVisitors.set(row.slug, set);
         }
       }
+      const characterOgVisitors = new Map<string, Set<string>>();
+      if (Array.isArray(d.characterOgVisitors)) {
+        for (const row of d.characterOgVisitors) {
+          if (!row || typeof row.id !== 'string') continue;
+          const set = new Set<string>(Array.isArray(row.visitors) ? row.visitors : []);
+          characterOgVisitors.set(row.id, set);
+        }
+      }
       this.days.set(d.date, {
         date: d.date,
         shares: Number(d.shares) || 0,
@@ -492,6 +518,8 @@ export class StickyMetrics {
         arcExtraViews: Number(d.arcExtraViews) || 0,
         arcOgVisitors,
         arcOgExtraRenders: Number(d.arcOgExtraRenders) || 0,
+        characterOgVisitors,
+        characterOgExtraRenders: Number(d.characterOgExtraRenders) || 0,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -682,6 +710,30 @@ export class StickyMetrics {
   }
 
   /**
+   * Record a render of `/character/:name/og.png` (TINA-882). Same dedup
+   * shape as `recordMomentOgRender` — keyed on canonical persona id +
+   * visitor/IP. Pass the manifest id (never the URL slug) so two crawler
+   * fetches across `/character/Mei` and `/character/mei-tanaka` count once.
+   */
+  recordCharacterOgRender(personaId: string, visitorOrIp: string): void {
+    if (!personaId || !visitorOrIp) return;
+    const key = personaId.toLowerCase();
+    const day = this.day(dayKeyUtc(this.now()));
+    let set = day.characterOgVisitors.get(key);
+    if (!set) {
+      set = new Set<string>();
+      day.characterOgVisitors.set(key, set);
+    }
+    if (set.has(visitorOrIp)) return;
+    if (set.size < this.maxMomentVisitorsPerDay) {
+      set.add(visitorOrIp);
+    } else {
+      day.characterOgExtraRenders += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
    * Record a render of `/zone/:name/og.png` (TINA-744). Same dedup shape as
    * `recordMomentOgRender` — keyed on canonical (lowercased) zone + visitor/IP.
    */
@@ -847,6 +899,10 @@ export class StickyMetrics {
       if (d) {
         for (const set of d.arcOgVisitors.values()) arcOgRenders += set.size;
       }
+      let characterOgRenders = d?.characterOgExtraRenders ?? 0;
+      if (d) {
+        for (const set of d.characterOgVisitors.values()) characterOgRenders += set.size;
+      }
       out.push({
         date,
         sharesCreated: d?.shares ?? 0,
@@ -865,6 +921,7 @@ export class StickyMetrics {
         zoneOgRenders,
         arcViews,
         arcOgRenders,
+        characterOgRenders,
       });
     }
     return out;
@@ -919,6 +976,8 @@ export class StickyMetrics {
         arcExtraViews: 0,
         arcOgVisitors: new Map(),
         arcOgExtraRenders: 0,
+        characterOgVisitors: new Map(),
+        characterOgExtraRenders: 0,
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -1052,6 +1111,11 @@ export class StickyMetrics {
           visitors: [...set],
         })),
         arcOgExtraRenders: d.arcOgExtraRenders,
+        characterOgVisitors: [...d.characterOgVisitors.entries()].map(([id, set]) => ({
+          id,
+          visitors: [...set],
+        })),
+        characterOgExtraRenders: d.characterOgExtraRenders,
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,

@@ -6,6 +6,7 @@ import { describe, expect, test } from 'vitest';
 import { CharacterRoutes } from './character-routes.js';
 import { MomentStore } from './moments.js';
 import { ObservabilityStore } from './observability.js';
+import { OgCache } from './og-routes.js';
 
 function mockReq(
   opts: {
@@ -275,7 +276,39 @@ describe('CharacterRoutes.handleCharacterPage', () => {
     expect(res.responseHeaders['retry-after']).toBeDefined();
   });
 
-  test('escapes user-controlled bio + headline content', () => {
+  test('emits the OG image meta tag set when the cache is wired (TINA-882)', () => {
+    const ogCache = new OgCache({ maxEntries: 4 });
+    const routes = new CharacterRoutes({
+      named: [fakePersona('mei-tanaka', 'Mei Tanaka')],
+      moments: new MomentStore({ maxMoments: 5 }),
+      observability: new ObservabilityStore(),
+      simSpeed: 30,
+      publicBaseUrl: 'https://tinyhouse.up.railway.app',
+      ogCache,
+    });
+    const res = mockRes();
+    routes.handleCharacterPage(mockReq(), res, 'mei-tanaka');
+    expect(res.statusCode).toBe(200);
+    // All four OG/Twitter image tags + summary_large_image card.
+    expect(res.body).toContain('og:image');
+    expect(res.body).toContain(
+      'https://tinyhouse.up.railway.app/character/mei-tanaka/og.png',
+    );
+    expect(res.body).toContain('og:image:width" content="1200"');
+    expect(res.body).toContain('og:image:height" content="630"');
+    expect(res.body).toContain('og:image:type" content="image/png"');
+    expect(res.body).toContain('twitter:card" content="summary_large_image"');
+  });
+
+  test('falls back to text-only OG meta when no cache is wired', () => {
+    const { routes } = buildRoutes();
+    const res = mockRes();
+    routes.handleCharacterPage(mockReq(), res, 'mei-tanaka');
+    expect(res.body).toContain('twitter:card" content="summary"');
+    expect(res.body).not.toContain('og:image');
+  });
+
+  test('escapes user-controlled bio + headline content (with OG cache off)', () => {
     const xssyPersona = fakePersona('xss', 'Xss');
     xssyPersona.manifest.bio = '<script>alert(1)</script>';
     const moments = new MomentStore({
@@ -309,5 +342,121 @@ describe('CharacterRoutes.handleCharacterPage', () => {
     expect(res.body).not.toContain('<script>alert(1)</script>');
     expect(res.body).toContain('&lt;script&gt;');
     expect(res.body).toContain('&lt;zone&gt;');
+  });
+});
+
+describe('CharacterRoutes.handleCharacterOgImage (TINA-882)', () => {
+  function buildOgRoutes(persona = fakePersona('mei-tanaka', 'Mei Tanaka')) {
+    const ogCache = new OgCache({ maxEntries: 8 });
+    const moments = new MomentStore({
+      maxMoments: 5,
+      idGenerator: (() => {
+        let n = 0;
+        return () => `mom${++n}`;
+      })(),
+    });
+    const ogRenders: Array<{ id: string; ip: string }> = [];
+    const routes = new CharacterRoutes({
+      named: [persona, fakePersona('hiro-abe', 'Hiro Abe')],
+      moments,
+      observability: new ObservabilityStore(),
+      simSpeed: 30,
+      ogCache,
+      onOgRender: (id, ip) => {
+        ogRenders.push({ id, ip });
+      },
+    });
+    return { routes, ogCache, moments, ogRenders };
+  }
+
+  test('200 PNG on a known character with LRU caching', async () => {
+    const { routes, ogCache } = buildOgRoutes();
+    const res = mockRes();
+    await routes.handleCharacterOgImage(mockReq(), res, 'mei-tanaka');
+    expect(res.statusCode).toBe(200);
+    expect(res.responseHeaders['content-type']).toBe('image/png');
+    expect(res.responseHeaders['x-og-cache']).toBe('miss');
+    // Cache write is fire-and-forget — drain microtasks before checking size.
+    await new Promise((r) => setImmediate(r));
+    expect(ogCache.size()).toBe(1);
+    // Second hit serves from the cache.
+    const res2 = mockRes();
+    await routes.handleCharacterOgImage(mockReq(), res2, 'mei-tanaka');
+    expect(res2.responseHeaders['x-og-cache']).toBe('hit');
+  });
+
+  test('first-name slug resolves to canonical id for cache key', async () => {
+    const { routes, ogCache } = buildOgRoutes();
+    const res = mockRes();
+    await routes.handleCharacterOgImage(mockReq(), res, 'mei');
+    expect(res.statusCode).toBe(200);
+    await new Promise((r) => setImmediate(r));
+    expect(ogCache.size()).toBe(1);
+    // Same persona via the manifest id should be a cache hit, not miss.
+    const res2 = mockRes();
+    await routes.handleCharacterOgImage(mockReq(), res2, 'mei-tanaka');
+    expect(res2.responseHeaders['x-og-cache']).toBe('hit');
+  });
+
+  test('returns 404 for unknown character', async () => {
+    const { routes } = buildOgRoutes();
+    const res = mockRes();
+    await routes.handleCharacterOgImage(mockReq(), res, 'nobody');
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('rejects malformed names with 404', async () => {
+    const { routes } = buildOgRoutes();
+    const res = mockRes();
+    await routes.handleCharacterOgImage(mockReq(), res, '../etc/passwd');
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('falls through to 404 when no cache is wired', async () => {
+    const routes = new CharacterRoutes({
+      named: [fakePersona('mei-tanaka', 'Mei Tanaka')],
+      moments: new MomentStore({ maxMoments: 5 }),
+      observability: new ObservabilityStore(),
+      simSpeed: 30,
+    });
+    const res = mockRes();
+    await routes.handleCharacterOgImage(mockReq(), res, 'mei-tanaka');
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('shares the rate limiter with the HTML route', async () => {
+    const ogCache = new OgCache({ maxEntries: 4 });
+    const routes = new CharacterRoutes({
+      named: [fakePersona('mei-tanaka', 'Mei Tanaka')],
+      moments: new MomentStore({ maxMoments: 5 }),
+      observability: new ObservabilityStore(),
+      simSpeed: 30,
+      perIpPerMin: 2,
+      globalPerMin: 100,
+      now: () => 1_000_000,
+      ogCache,
+    });
+    // Hit the HTML route twice — that exhausts the per-IP bucket of 2.
+    for (let i = 0; i < 2; i++) {
+      const r = mockRes();
+      const out = routes.handleCharacterPage(mockReq(), r, 'mei-tanaka');
+      expect(out.status).toBe(200);
+    }
+    // The OG route should share the bucket and be 429'd.
+    const res = mockRes();
+    await routes.handleCharacterOgImage(mockReq(), res, 'mei-tanaka');
+    expect(res.statusCode).toBe(429);
+  });
+
+  test('fires onOgRender with canonical persona id and request IP', async () => {
+    const { routes, ogRenders } = buildOgRoutes();
+    const res = mockRes();
+    await routes.handleCharacterOgImage(
+      mockReq({ remoteAddress: '203.0.113.5' }),
+      res,
+      'mei',
+    );
+    expect(res.statusCode).toBe(200);
+    expect(ogRenders).toEqual([{ id: 'mei-tanaka', ip: '203.0.113.5' }]);
   });
 });

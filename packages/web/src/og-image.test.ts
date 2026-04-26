@@ -5,6 +5,7 @@ import {
   OG_WIDTH,
   PixelCanvas,
   composeArcOg,
+  composeCharacterOg,
   composeMomentOg,
   composeZoneOg,
   encodePng,
@@ -321,5 +322,74 @@ describe('composeArcOg', () => {
       headline: 'shared a meal',
     });
     expect(a.equals(b)).toBe(false);
+  });
+});
+
+describe('composeCharacterOg', () => {
+  const baseInput = {
+    name: 'Mei Tanaka',
+    color: '#ffaaaa',
+    bio: 'a soft-spoken librarian who hand-letters her shelf cards',
+    arc: { label: 'warming', otherName: 'Hiro Abe' },
+    headline: 'Mei and Hiro caught up at the counter',
+  } as const;
+
+  test('renders a 1200x630 PNG for a populated character', () => {
+    const png = composeCharacterOg({ ...baseInput, variant: 'conversation' });
+    expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    expect(png.readUInt32BE(16)).toBe(OG_WIDTH);
+    expect(png.readUInt32BE(20)).toBe(OG_HEIGHT);
+  });
+
+  test('is deterministic — same input produces the same bytes', () => {
+    const input = { ...baseInput, variant: 'conversation' as const };
+    const a = composeCharacterOg(input);
+    const b = composeCharacterOg(input);
+    expect(a.equals(b)).toBe(true);
+  });
+
+  test('bio truncation produces a different render than a short bio (single-line clamp)', () => {
+    const long = composeCharacterOg({
+      ...baseInput,
+      bio: 'an extraordinarily long biographical paragraph that absolutely cannot fit on a single OG card line because it just keeps going on and on and on and on',
+    });
+    const short = composeCharacterOg({ ...baseInput, bio: 'short bio' });
+    // Different bytes means truncation actually shaped the layout — guards
+    // against a regression where a one-line clamp silently drops to 0 chars.
+    expect(long.equals(short)).toBe(false);
+    expect(long.length).toBeGreaterThan(1000);
+  });
+
+  test('falls back gracefully on an empty headline', () => {
+    const empty = composeCharacterOg({ ...baseInput, headline: '' });
+    expect(empty.length).toBeGreaterThan(1000);
+    const populated = composeCharacterOg({ ...baseInput, headline: 'a busy afternoon' });
+    expect(empty.equals(populated)).toBe(false);
+  });
+
+  test('group variant renders a different footer chip than conversation', () => {
+    const conv = composeCharacterOg({ ...baseInput, variant: 'conversation' });
+    const grp = composeCharacterOg({ ...baseInput, variant: 'group', participantCount: 4 });
+    expect(conv.equals(grp)).toBe(false);
+  });
+
+  test('null arc renders without throwing (no chip)', () => {
+    const png = composeCharacterOg({ ...baseInput, arc: null });
+    expect(png.length).toBeGreaterThan(1000);
+    // Different bytes than the arc-chip case so callers can rely on cache
+    // miss semantics across arc state transitions.
+    const withArc = composeCharacterOg(baseInput);
+    expect(png.equals(withArc)).toBe(false);
+  });
+
+  test('handles missing/invalid color and unsupported chars in bio', () => {
+    const png = composeCharacterOg({
+      name: 'Xss',
+      color: 'not-a-color',
+      bio: 'emoji ☃ smuggled into bio ✨',
+      arc: null,
+      headline: 'a quiet morning',
+    });
+    expect(png.length).toBeGreaterThan(1000);
   });
 });

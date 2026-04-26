@@ -1067,6 +1067,11 @@ interface StickyDailyRollup {
   zoneViews?: number;
   /** Per-pair /arc/:slug views, deduped per (slug, visitor) per day (TINA-813). */
   arcViews?: number;
+  /**
+   * Per-character /character/:name/og.png renders, deduped per (id, visitor)
+   * per day (TINA-882). Mostly bumped by social-media crawlers.
+   */
+  characterOgRenders?: number;
 }
 
 interface StickyMetricsPayload {
@@ -1095,7 +1100,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
   table.className = 'sticky-table';
   const thead = document.createElement('thead');
   thead.innerHTML =
-    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th><th>dig</th><th>zon</th><th>arc</th></tr>';
+    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th><th>dig</th><th>zon</th><th>arc</th><th>cog</th></tr>';
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const d of rows) {
@@ -1107,6 +1112,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
     const digestViews = d.digestViews ?? 0;
     const zoneViews = d.zoneViews ?? 0;
     const arcViews = d.arcViews ?? 0;
+    const characterOg = d.characterOgRenders ?? 0;
     const cells: Array<[string, boolean]> = [
       [d.date.slice(5), false],
       [String(d.sharesCreated), d.sharesCreated === 0],
@@ -1119,6 +1125,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
       [String(digestViews), digestViews === 0],
       [String(zoneViews), zoneViews === 0],
       [String(arcViews), arcViews === 0],
+      [String(characterOg), characterOg === 0],
     ];
     for (const [text, isZero] of cells) {
       const td = document.createElement('td');

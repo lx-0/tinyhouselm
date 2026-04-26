@@ -132,6 +132,16 @@ const ARC_OG_CACHE_DIR = isAbsolute(ARC_OG_CACHE_DIR_ENV)
   : resolve(process.cwd(), ARC_OG_CACHE_DIR_ENV);
 const ARC_OG_LRU_SIZE = Number(process.env.ARC_OG_LRU_SIZE ?? 64);
 
+// Per-character OG image (TINA-882). One OG per named persona — the starter
+// roster is ~5 personas, so the LRU is tuned small. Tunable via env so a
+// future "second town" with a wider roster still fits without redeploy.
+const CHARACTER_OG_CACHE_DIR_ENV =
+  process.env.CHARACTER_OG_CACHE_DIR ?? './data/character-og-cache';
+const CHARACTER_OG_CACHE_DIR = isAbsolute(CHARACTER_OG_CACHE_DIR_ENV)
+  ? CHARACTER_OG_CACHE_DIR_ENV
+  : resolve(process.cwd(), CHARACTER_OG_CACHE_DIR_ENV);
+const CHARACTER_OG_LRU_SIZE = Number(process.env.CHARACTER_OG_LRU_SIZE ?? 64);
+
 // Multi-character group co-presence moments (TINA-345).
 const GROUP_MOMENTS_ENABLED =
   (process.env.GROUP_MOMENTS_ENABLED ?? 'true').toLowerCase() !== 'false';
@@ -754,6 +764,15 @@ async function main(): Promise<void> {
 
   // Per-character public profile pages (TINA-482). Only wired when the moment
   // store is enabled — without recent moments the page is mostly empty.
+  // OG image cache (TINA-882) shares the same gating: no moment store ⇒
+  // freshest-headline isn't available, so the cards aren't worth rendering.
+  const characterOgCache = moments
+    ? new OgCache({
+        dir: CHARACTER_OG_CACHE_DIR,
+        maxEntries: CHARACTER_OG_LRU_SIZE,
+        log: (level, event, fields) => log[level](event, fields),
+      })
+    : null;
   const characterRoutes = moments
     ? new CharacterRoutes({
         named,
@@ -762,8 +781,22 @@ async function main(): Promise<void> {
         observability,
         simSpeed: clock.speed,
         publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+        ogCache: characterOgCache,
+        log: (level, event, fields) => log[level](event, fields),
+        onOgRender: (personaId, ip) => {
+          // Mirrors `arcOgRenders` — crawler bots rarely carry the cookie,
+          // so the IP fallback gives us a reasonable per-character count.
+          stickyMetrics?.recordCharacterOgRender(personaId, ip);
+        },
       })
     : null;
+  if (characterRoutes?.hasOgImage()) {
+    log.info('character.og.ready', {
+      dir: CHARACTER_OG_CACHE_DIR,
+      ogLruSize: CHARACTER_OG_LRU_SIZE,
+      named: named.length,
+    });
+  }
 
   // Paginated moments index (TINA-544). Closes the share loop: a visitor who
   // landed on `/moment/:id` can now browse "more like this" by character /
@@ -1026,8 +1059,16 @@ async function main(): Promise<void> {
       }
       return;
     }
+    // Character OG image MUST come before the /character/:name HTML page since
+    // the image path shares the `/character/` prefix (TINA-882).
     if (characterRoutes && req.method === 'GET' && url.pathname.startsWith('/character/')) {
-      const rawName = url.pathname.slice('/character/'.length);
+      const tail = url.pathname.slice('/character/'.length);
+      if (tail.endsWith('/og.png')) {
+        const rawName = tail.slice(0, -'/og.png'.length);
+        await characterRoutes.handleCharacterOgImage(req, res, rawName);
+        return;
+      }
+      const rawName = tail;
       // Stamp the visitor cookie up-front so dedup works on first hit.
       // Counter bump is conditional on a successful 200 — we don't want to
       // count rate-limited or 404 hits toward the per-name dedup set.

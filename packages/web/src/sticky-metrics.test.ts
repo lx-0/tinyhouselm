@@ -53,6 +53,7 @@ describe('StickyMetrics.recordShare', () => {
       zoneOgRenders: 0,
       arcViews: 0,
       arcOgRenders: 0,
+      characterOgRenders: 0,
     });
     expect(r[0]!.date).toBe('2026-04-17');
   });
@@ -763,6 +764,52 @@ describe('StickyMetrics.recordArcOgRender (TINA-813)', () => {
     m.recordArcOgRender('hiro-mei', 'slackbot');
     m.recordArcOgRender('ava-mei', 'twitterbot'); // different pair, twitterbot counts again
     expect(m.rollup(7).at(-1)!.arcOgRenders).toBe(3);
+  });
+});
+
+describe('StickyMetrics.recordCharacterOgRender (TINA-882)', () => {
+  test('aggregates per-character dedup into one rollup counter', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordCharacterOgRender('mei-tanaka', 'twitterbot');
+    m.recordCharacterOgRender('mei-tanaka', 'twitterbot'); // dedup
+    m.recordCharacterOgRender('mei-tanaka', 'slackbot');
+    m.recordCharacterOgRender('hiro-abe', 'twitterbot'); // different character, twitterbot counts again
+    expect(m.rollup(7).at(-1)!.characterOgRenders).toBe(3);
+  });
+
+  test('caps per-character dedup set and counts overflow as extras', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-26T10:00:00Z'),
+      maxMomentVisitorsPerDay: 2,
+    });
+    m.recordCharacterOgRender('mei-tanaka', 'a');
+    m.recordCharacterOgRender('mei-tanaka', 'b');
+    // Beyond the cap: counter still bumps, dedup set stays capped.
+    m.recordCharacterOgRender('mei-tanaka', 'c');
+    expect(m.rollup(7).at(-1)!.characterOgRenders).toBe(3);
+  });
+
+  test('ignores empty inputs', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordCharacterOgRender('', 'twitterbot');
+    m.recordCharacterOgRender('mei-tanaka', '');
+    expect(m.rollup(7).at(-1)!.characterOgRenders).toBe(0);
+  });
+
+  test('persists across a load-write-load cycle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-charog-'));
+    const ref = { ms: Date.parse('2026-04-26T10:00:00Z') };
+    const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m1.load();
+    m1.recordCharacterOgRender('mei-tanaka', 'twitterbot');
+    await m1.flush();
+
+    const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m2.load();
+    expect(m2.rollup(7).at(-1)!.characterOgRenders).toBe(1);
+    // Same tuple after reload still dedupes.
+    m2.recordCharacterOgRender('mei-tanaka', 'twitterbot');
+    expect(m2.rollup(7).at(-1)!.characterOgRenders).toBe(1);
   });
 });
 
