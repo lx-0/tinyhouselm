@@ -900,9 +900,7 @@ export function composeCharacterOg(input: CharacterOgInput): Buffer {
   c.fillRect(0, 0, OG_WIDTH, 80, PANEL);
   c.drawText(48, 32, 'TINA · CHARACTER', ACCENT, 4);
   if (input.arc) {
-    const chip = normalizeForFont(
-      `${input.arc.label} WITH ${input.arc.otherName}`.toUpperCase(),
-    );
+    const chip = normalizeForFont(`${input.arc.label} WITH ${input.arc.otherName}`.toUpperCase());
     const chipW = measureText(chip, 3);
     c.drawText(OG_WIDTH - chipW - 48, 36, chip, HALO, 3);
   }

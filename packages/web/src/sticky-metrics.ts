@@ -170,6 +170,17 @@ interface DayState {
   characterOgVisitors: Map<string, Set<string>>;
   /** Floor counter once a per-character dedup set hits its cap. */
   characterOgExtraRenders: number;
+  /**
+   * Per-source-moment-id dedup sets for related-moments rail clicks on
+   * `/moment/:id` (TINA-952). Keyed on the *source* moment id (the page the
+   * rail rendered on, passed back as `?from=`); each set holds visitor ids
+   * (or raw IPs for clients that don't carry the cookie) that already counted
+   * toward `momentRailClicks` this day. Past the per-id cap the dedup set
+   * stops growing and the floor counter climbs.
+   */
+  momentRailClickVisitors: Map<string, Set<string>>;
+  /** Floor counter once a per-source dedup set hits its cap. */
+  momentRailClickExtra: number;
 }
 
 interface VisitorState {
@@ -222,6 +233,9 @@ interface PersistedDay {
   /** Absent on payloads written before TINA-882; loaded as empty + 0. */
   characterOgVisitors?: Array<{ id: string; visitors: string[] }>;
   characterOgExtraRenders?: number;
+  /** Absent on payloads written before TINA-952; loaded as empty + 0. */
+  momentRailClickVisitors?: Array<{ id: string; visitors: string[] }>;
+  momentRailClickExtra?: number;
 }
 
 interface PersistedVisitor {
@@ -304,6 +318,14 @@ export interface DailyRollup {
    * IP each count once per day.
    */
   characterOgRenders: number;
+  /**
+   * Related-moments rail clicks on `/moment/:id` this day (TINA-952), deduped
+   * per (source-moment, IP-or-visitor). The counter measures how many
+   * distinct rail-driven hops happen per source page — the depth-loop signal
+   * the share funnel reads as a 24h returner via TINA-145. Same dedup shape
+   * as `momentOgRenders`.
+   */
+  momentRailClicks: number;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -490,6 +512,14 @@ export class StickyMetrics {
           characterOgVisitors.set(row.id, set);
         }
       }
+      const momentRailClickVisitors = new Map<string, Set<string>>();
+      if (Array.isArray(d.momentRailClickVisitors)) {
+        for (const row of d.momentRailClickVisitors) {
+          if (!row || typeof row.id !== 'string') continue;
+          const set = new Set<string>(Array.isArray(row.visitors) ? row.visitors : []);
+          momentRailClickVisitors.set(row.id, set);
+        }
+      }
       this.days.set(d.date, {
         date: d.date,
         shares: Number(d.shares) || 0,
@@ -520,6 +550,8 @@ export class StickyMetrics {
         arcOgExtraRenders: Number(d.arcOgExtraRenders) || 0,
         characterOgVisitors,
         characterOgExtraRenders: Number(d.characterOgExtraRenders) || 0,
+        momentRailClickVisitors,
+        momentRailClickExtra: Number(d.momentRailClickExtra) || 0,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -734,6 +766,31 @@ export class StickyMetrics {
   }
 
   /**
+   * Record a click on the related-moments rail (TINA-952). Deduped per
+   * (source-moment, visitor-or-IP) per UTC day. Pass the *source* moment id
+   * (the page where the rail rendered, carried back to the server in the
+   * `?from=` query param), never the destination — the counter measures rail
+   * conversion *out of* a page, not into one. Past the per-source cap the
+   * dedup set stops growing and the floor counter climbs.
+   */
+  recordMomentRailClick(sourceMomentId: string, visitorOrIp: string): void {
+    if (!sourceMomentId || !visitorOrIp) return;
+    const day = this.day(dayKeyUtc(this.now()));
+    let set = day.momentRailClickVisitors.get(sourceMomentId);
+    if (!set) {
+      set = new Set<string>();
+      day.momentRailClickVisitors.set(sourceMomentId, set);
+    }
+    if (set.has(visitorOrIp)) return;
+    if (set.size < this.maxMomentVisitorsPerDay) {
+      set.add(visitorOrIp);
+    } else {
+      day.momentRailClickExtra += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
    * Record a render of `/zone/:name/og.png` (TINA-744). Same dedup shape as
    * `recordMomentOgRender` — keyed on canonical (lowercased) zone + visitor/IP.
    */
@@ -903,6 +960,10 @@ export class StickyMetrics {
       if (d) {
         for (const set of d.characterOgVisitors.values()) characterOgRenders += set.size;
       }
+      let momentRailClicks = d?.momentRailClickExtra ?? 0;
+      if (d) {
+        for (const set of d.momentRailClickVisitors.values()) momentRailClicks += set.size;
+      }
       out.push({
         date,
         sharesCreated: d?.shares ?? 0,
@@ -922,6 +983,7 @@ export class StickyMetrics {
         arcViews,
         arcOgRenders,
         characterOgRenders,
+        momentRailClicks,
       });
     }
     return out;
@@ -978,6 +1040,8 @@ export class StickyMetrics {
         arcOgExtraRenders: 0,
         characterOgVisitors: new Map(),
         characterOgExtraRenders: 0,
+        momentRailClickVisitors: new Map(),
+        momentRailClickExtra: 0,
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -1116,6 +1180,11 @@ export class StickyMetrics {
           visitors: [...set],
         })),
         characterOgExtraRenders: d.characterOgExtraRenders,
+        momentRailClickVisitors: [...d.momentRailClickVisitors.entries()].map(([id, set]) => ({
+          id,
+          visitors: [...set],
+        })),
+        momentRailClickExtra: d.momentRailClickExtra,
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,
