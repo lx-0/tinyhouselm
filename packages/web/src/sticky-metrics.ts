@@ -127,6 +127,23 @@ interface DayState {
   digestOgVisitors: Map<string, Set<string>>;
   /** Floor counter once a per-date dedup set hits its cap. */
   digestOgExtraRenders: number;
+  /**
+   * Per-zone dedup sets for `/zone/:name` page hits (TINA-744). Keyed by
+   * lowercased zone name; each set holds visitor ids that already counted
+   * toward `zoneViews` this day. Past the per-name cap the dedup set stops
+   * growing and the floor counter climbs.
+   */
+  zoneVisitors: Map<string, Set<string>>;
+  /** Floor counter once a per-zone dedup set hits its cap. */
+  zoneExtraViews: number;
+  /**
+   * Per-zone dedup sets for `/zone/:name/og.png` renders (TINA-744). Same
+   * shape as `momentOgVisitors` — most fetches are social-media crawlers
+   * without the `tvid` cookie, so the caller passes IP fallback.
+   */
+  zoneOgVisitors: Map<string, Set<string>>;
+  /** Floor counter once a per-zone dedup set hits its cap. */
+  zoneOgExtraRenders: number;
 }
 
 interface VisitorState {
@@ -164,6 +181,12 @@ interface PersistedDay {
   /** Absent on payloads written before TINA-684; loaded as empty + 0. */
   digestOgVisitors?: Array<{ date: string; visitors: string[] }>;
   digestOgExtraRenders?: number;
+  /** Absent on payloads written before TINA-744; loaded as empty + 0. */
+  zoneVisitors?: Array<{ zone: string; visitors: string[] }>;
+  zoneExtraViews?: number;
+  /** Absent on payloads written before TINA-744; loaded as empty + 0. */
+  zoneOgVisitors?: Array<{ zone: string; visitors: string[] }>;
+  zoneOgExtraRenders?: number;
 }
 
 interface PersistedVisitor {
@@ -219,6 +242,16 @@ export interface DailyRollup {
    * as `momentOgRenders`.
    */
   digestOgRenders: number;
+  /**
+   * `/zone/:name` page hits this day (TINA-744), deduped per (zone-name,
+   * IP-or-visitor). Multiple zones from one IP each count once per day.
+   */
+  zoneViews: number;
+  /**
+   * `/zone/:name/og.png` renders this day (TINA-744), same dedup shape as
+   * `momentOgRenders`. Mostly bumped by social-media crawlers.
+   */
+  zoneOgRenders: number;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -365,6 +398,22 @@ export class StickyMetrics {
           digestOgVisitors.set(row.date, set);
         }
       }
+      const zoneVisitors = new Map<string, Set<string>>();
+      if (Array.isArray(d.zoneVisitors)) {
+        for (const row of d.zoneVisitors) {
+          if (!row || typeof row.zone !== 'string') continue;
+          const set = new Set<string>(Array.isArray(row.visitors) ? row.visitors : []);
+          zoneVisitors.set(row.zone, set);
+        }
+      }
+      const zoneOgVisitors = new Map<string, Set<string>>();
+      if (Array.isArray(d.zoneOgVisitors)) {
+        for (const row of d.zoneOgVisitors) {
+          if (!row || typeof row.zone !== 'string') continue;
+          const set = new Set<string>(Array.isArray(row.visitors) ? row.visitors : []);
+          zoneOgVisitors.set(row.zone, set);
+        }
+      }
       this.days.set(d.date, {
         date: d.date,
         shares: Number(d.shares) || 0,
@@ -385,6 +434,10 @@ export class StickyMetrics {
         digestExtraViews: Number(d.digestExtraViews) || 0,
         digestOgVisitors,
         digestOgExtraRenders: Number(d.digestOgExtraRenders) || 0,
+        zoneVisitors,
+        zoneExtraViews: Number(d.zoneExtraViews) || 0,
+        zoneOgVisitors,
+        zoneOgExtraRenders: Number(d.zoneOgExtraRenders) || 0,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -499,6 +552,52 @@ export class StickyMetrics {
       set.add(visitorOrIp);
     } else {
       day.digestExtraViews += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
+   * Record a hit on `/zone/:name` (TINA-744). Deduped per (zone, visitor-or-IP)
+   * per UTC day. Pass the canonical (lowercased) zone name so dedup is stable
+   * across slug variants. Past the per-zone cap the dedup set stops growing
+   * and the floor counter climbs.
+   */
+  recordZoneView(zoneName: string, visitorOrIp: string): void {
+    if (!zoneName || !visitorOrIp) return;
+    const key = zoneName.toLowerCase();
+    const day = this.day(dayKeyUtc(this.now()));
+    let set = day.zoneVisitors.get(key);
+    if (!set) {
+      set = new Set<string>();
+      day.zoneVisitors.set(key, set);
+    }
+    if (set.has(visitorOrIp)) return;
+    if (set.size < this.maxMomentVisitorsPerDay) {
+      set.add(visitorOrIp);
+    } else {
+      day.zoneExtraViews += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
+   * Record a render of `/zone/:name/og.png` (TINA-744). Same dedup shape as
+   * `recordMomentOgRender` — keyed on canonical (lowercased) zone + visitor/IP.
+   */
+  recordZoneOgRender(zoneName: string, visitorOrIp: string): void {
+    if (!zoneName || !visitorOrIp) return;
+    const key = zoneName.toLowerCase();
+    const day = this.day(dayKeyUtc(this.now()));
+    let set = day.zoneOgVisitors.get(key);
+    if (!set) {
+      set = new Set<string>();
+      day.zoneOgVisitors.set(key, set);
+    }
+    if (set.has(visitorOrIp)) return;
+    if (set.size < this.maxMomentVisitorsPerDay) {
+      set.add(visitorOrIp);
+    } else {
+      day.zoneOgExtraRenders += 1;
     }
     this.scheduleFlush();
   }
@@ -631,6 +730,14 @@ export class StickyMetrics {
       if (d) {
         for (const set of d.digestOgVisitors.values()) digestOgRenders += set.size;
       }
+      let zoneViews = d?.zoneExtraViews ?? 0;
+      if (d) {
+        for (const set of d.zoneVisitors.values()) zoneViews += set.size;
+      }
+      let zoneOgRenders = d?.zoneOgExtraRenders ?? 0;
+      if (d) {
+        for (const set of d.zoneOgVisitors.values()) zoneOgRenders += set.size;
+      }
       out.push({
         date,
         sharesCreated: d?.shares ?? 0,
@@ -645,6 +752,8 @@ export class StickyMetrics {
         momentOgRenders,
         digestViews,
         digestOgRenders,
+        zoneViews,
+        zoneOgRenders,
       });
     }
     return out;
@@ -691,6 +800,10 @@ export class StickyMetrics {
         digestExtraViews: 0,
         digestOgVisitors: new Map(),
         digestOgExtraRenders: 0,
+        zoneVisitors: new Map(),
+        zoneExtraViews: 0,
+        zoneOgVisitors: new Map(),
+        zoneOgExtraRenders: 0,
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -804,6 +917,16 @@ export class StickyMetrics {
           visitors: [...set],
         })),
         digestOgExtraRenders: d.digestOgExtraRenders,
+        zoneVisitors: [...d.zoneVisitors.entries()].map(([zone, set]) => ({
+          zone,
+          visitors: [...set],
+        })),
+        zoneExtraViews: d.zoneExtraViews,
+        zoneOgVisitors: [...d.zoneOgVisitors.entries()].map(([zone, set]) => ({
+          zone,
+          visitors: [...set],
+        })),
+        zoneOgExtraRenders: d.zoneOgExtraRenders,
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,

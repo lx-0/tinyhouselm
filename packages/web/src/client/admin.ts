@@ -1063,6 +1063,8 @@ interface StickyDailyRollup {
   affordanceUses?: number;
   digestViews?: number;
   digestOgRenders?: number;
+  /** Per-zone /zone/:name views, deduped per (zone, visitor) per day (TINA-744). */
+  zoneViews?: number;
 }
 
 interface StickyMetricsPayload {
@@ -1091,7 +1093,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
   table.className = 'sticky-table';
   const thead = document.createElement('thead');
   thead.innerHTML =
-    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th><th>dig</th></tr>';
+    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th><th>dig</th><th>zon</th></tr>';
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const d of rows) {
@@ -1101,6 +1103,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
     const groupMoments = d.groupMomentsCreated ?? 0;
     const affordances = d.affordanceUses ?? 0;
     const digestViews = d.digestViews ?? 0;
+    const zoneViews = d.zoneViews ?? 0;
     const cells: Array<[string, boolean]> = [
       [d.date.slice(5), false],
       [String(d.sharesCreated), d.sharesCreated === 0],
@@ -1111,6 +1114,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
       [String(groupMoments), groupMoments === 0],
       [String(affordances), affordances === 0],
       [String(digestViews), digestViews === 0],
+      [String(zoneViews), zoneViews === 0],
     ];
     for (const [text, isZero] of cells) {
       const td = document.createElement('td');

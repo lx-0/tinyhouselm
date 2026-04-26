@@ -49,6 +49,8 @@ describe('StickyMetrics.recordShare', () => {
       momentOgRenders: 0,
       digestViews: 0,
       digestOgRenders: 0,
+      zoneViews: 0,
+      zoneOgRenders: 0,
     });
     expect(r[0]!.date).toBe('2026-04-17');
   });
@@ -627,6 +629,72 @@ describe('StickyMetrics.recordDigestOgRender (TINA-684)', () => {
     m.recordDigestOgRender('sd-12', 'slackbot');
     m.recordDigestOgRender('sd-13', 'twitterbot'); // different date, twitterbot counts
     expect(m.rollup(7).at(-1)!.digestOgRenders).toBe(3);
+  });
+});
+
+describe('StickyMetrics.recordZoneView (TINA-744)', () => {
+  test('dedupes by (zone, visitor) per UTC day', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordZoneView('cafe', 'alice');
+    m.recordZoneView('cafe', 'alice'); // dedup
+    m.recordZoneView('cafe', 'bob');
+    m.recordZoneView('park', 'alice'); // different zone, alice counts again
+    expect(m.rollup(7).at(-1)!.zoneViews).toBe(3);
+  });
+
+  test('case-insensitive zone key dedup', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordZoneView('Cafe', 'alice');
+    m.recordZoneView('CAFE', 'alice'); // same canonical key — dedup
+    expect(m.rollup(7).at(-1)!.zoneViews).toBe(1);
+  });
+
+  test('caps the per-zone dedup set and floors overflow', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-25T10:00:00Z'),
+      maxMomentVisitorsPerDay: 2,
+    });
+    m.recordZoneView('cafe', 'a');
+    m.recordZoneView('cafe', 'b');
+    m.recordZoneView('cafe', 'c'); // floors
+    m.recordZoneView('cafe', 'd'); // floors
+    expect(m.rollup(7).at(-1)!.zoneViews).toBe(4);
+  });
+
+  test('ignores empty inputs', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordZoneView('', 'alice');
+    m.recordZoneView('cafe', '');
+    expect(m.rollup(7).at(-1)!.zoneViews).toBe(0);
+  });
+
+  test('persists across a load-write-load cycle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-zone-'));
+    const ref = { ms: Date.parse('2026-04-25T10:00:00Z') };
+    const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m1.load();
+    m1.recordZoneView('cafe', 'alice');
+    m1.recordZoneOgRender('cafe', 'twitterbot');
+    await m1.flush();
+
+    const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m2.load();
+    expect(m2.rollup(7).at(-1)!.zoneViews).toBe(1);
+    expect(m2.rollup(7).at(-1)!.zoneOgRenders).toBe(1);
+    // Same tuple after reload still dedupes.
+    m2.recordZoneView('cafe', 'alice');
+    expect(m2.rollup(7).at(-1)!.zoneViews).toBe(1);
+  });
+});
+
+describe('StickyMetrics.recordZoneOgRender (TINA-744)', () => {
+  test('aggregates per-zone dedup into one rollup counter', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-25T10:00:00Z') });
+    m.recordZoneOgRender('cafe', 'twitterbot');
+    m.recordZoneOgRender('cafe', 'twitterbot'); // dedup
+    m.recordZoneOgRender('cafe', 'slackbot');
+    m.recordZoneOgRender('park', 'twitterbot'); // different zone, twitterbot counts again
+    expect(m.rollup(7).at(-1)!.zoneOgRenders).toBe(3);
   });
 });
 

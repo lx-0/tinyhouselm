@@ -536,7 +536,9 @@ function renderMomentsList(selfId: string, moments: MomentRecord[], simSpeed: nu
       const otherNames = others.map((p) => escapeHtml(p.name)).join(', ');
       const groupBadge = isGroup ? `<span class="badge">group</span>` : '';
       const headline = `${escapeHtml(rec.headline)}${otherNames && isGroup ? ` <span class="zone">· with ${otherNames}</span>` : ''}`;
-      const zone = rec.zone ? `<span class="zone">${escapeHtml(rec.zone)}</span>` : '';
+      const zone = rec.zone
+        ? `<span class="zone"><a href="/zone/${escapeHtml(encodeURIComponent(rec.zone.toLowerCase()))}">${escapeHtml(rec.zone)}</a></span>`
+        : '';
       return `<div class="moment-row"><span class="day">${escapeHtml(dayLine)}</span><span class="headline"><a href="/moment/${escapeHtml(rec.id)}">${headline}</a> <span class="badges">${groupBadge}</span></span>${zone}</div>`;
     })
     .join('');

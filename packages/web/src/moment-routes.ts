@@ -376,7 +376,10 @@ function renderMomentHtml(
     })
     .join('');
 
-  const clockLine = `day ${rec.clock.day} · ${String(rec.clock.hour).padStart(2, '0')}:${String(rec.clock.minute).padStart(2, '0')} · ${rec.clock.phase}${rec.zone ? ` · ${escapeHtml(rec.zone)}` : ''}`;
+  const zoneLink = rec.zone
+    ? ` · <a href="/zone/${escapeHtml(encodeURIComponent(rec.zone.toLowerCase()))}">${escapeHtml(rec.zone)}</a>`
+    : '';
+  const clockLine = `day ${rec.clock.day} · ${String(rec.clock.hour).padStart(2, '0')}:${String(rec.clock.minute).padStart(2, '0')} · ${rec.clock.phase}${zoneLink}`;
 
   const turnsHtml = rec.transcript
     .map((t) => {

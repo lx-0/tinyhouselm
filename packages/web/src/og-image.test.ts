@@ -5,6 +5,7 @@ import {
   OG_WIDTH,
   PixelCanvas,
   composeMomentOg,
+  composeZoneOg,
   encodePng,
   measureText,
   parseHexColor,
@@ -200,5 +201,58 @@ describe('composeMomentOg', () => {
     });
     const png = composeMomentOg(rec);
     expect(png.length).toBeGreaterThan(1000);
+  });
+});
+
+describe('composeZoneOg', () => {
+  test('renders a 1200x630 PNG for a populated zone', () => {
+    const png = composeZoneOg({
+      zone: 'cafe',
+      headline: 'Mei and Hiro caught up at the counter',
+      momentsCount: 12,
+      participants: [
+        { name: 'Mei', named: true, color: '#ffaaaa' },
+        { name: 'Hiro', named: true, color: '#aaffff' },
+      ],
+    });
+    expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    expect(png.readUInt32BE(16)).toBe(OG_WIDTH);
+    expect(png.readUInt32BE(20)).toBe(OG_HEIGHT);
+  });
+
+  test('is deterministic — same input produces the same bytes', () => {
+    const input = {
+      zone: 'park',
+      headline: 'a quiet hour by the pond',
+      momentsCount: 4,
+      participants: [{ name: 'Rin', named: true, color: '#aaccff' }],
+    };
+    const a = composeZoneOg(input);
+    const b = composeZoneOg(input);
+    expect(a.equals(b)).toBe(true);
+  });
+
+  test('falls back gracefully on an empty zone (TINA-744 verification)', () => {
+    const png = composeZoneOg({
+      zone: 'park',
+      headline: '',
+      momentsCount: 0,
+      participants: [],
+    });
+    expect(png.length).toBeGreaterThan(1000);
+    // Different from the populated case: bytes must reflect the empty fallback.
+    const populated = composeZoneOg({
+      zone: 'park',
+      headline: 'someone showed up',
+      momentsCount: 1,
+      participants: [{ name: 'A', named: false, color: null }],
+    });
+    expect(png.equals(populated)).toBe(false);
+  });
+
+  test('different zone names produce different bytes', () => {
+    const a = composeZoneOg({ zone: 'cafe', headline: '', momentsCount: 0, participants: [] });
+    const b = composeZoneOg({ zone: 'park', headline: '', momentsCount: 0, participants: [] });
+    expect(a.equals(b)).toBe(false);
   });
 });

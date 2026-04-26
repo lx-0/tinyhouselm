@@ -45,6 +45,7 @@ import {
   generateVisitorId,
   parseVisitorCookie,
 } from './sticky-metrics.js';
+import { ZoneRoutes } from './zone-routes.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..', '..');
@@ -112,6 +113,14 @@ const DIGEST_OG_CACHE_DIR = isAbsolute(DIGEST_OG_CACHE_DIR_ENV)
   ? DIGEST_OG_CACHE_DIR_ENV
   : resolve(process.cwd(), DIGEST_OG_CACHE_DIR_ENV);
 const DIGEST_OG_LRU_SIZE = Number(process.env.DIGEST_OG_LRU_SIZE ?? 500);
+
+// Per-zone "what happened here" page (TINA-744). One OG image per zone,
+// mostly small N (4 in starter town) so the LRU can be tiny.
+const ZONE_OG_CACHE_DIR_ENV = process.env.ZONE_OG_CACHE_DIR ?? './data/zone-og-cache';
+const ZONE_OG_CACHE_DIR = isAbsolute(ZONE_OG_CACHE_DIR_ENV)
+  ? ZONE_OG_CACHE_DIR_ENV
+  : resolve(process.cwd(), ZONE_OG_CACHE_DIR_ENV);
+const ZONE_OG_LRU_SIZE = Number(process.env.ZONE_OG_LRU_SIZE ?? 64);
 
 // Multi-character group co-presence moments (TINA-345).
 const GROUP_MOMENTS_ENABLED =
@@ -794,6 +803,42 @@ async function main(): Promise<void> {
     });
   }
 
+  // Per-zone "what happened here" page (TINA-744). Reads from the live
+  // MomentRecord LRU + world objects — no new persistence, no LLM, no
+  // sim hot-path. OG image cached in its own disk-LRU keyed by zone.
+  const zoneOgCache = moments
+    ? new OgCache({
+        dir: ZONE_OG_CACHE_DIR,
+        maxEntries: ZONE_OG_LRU_SIZE,
+        log: (level, event, fields) => log[level](event, fields),
+      })
+    : null;
+  const zoneRoutes =
+    moments && zoneOgCache
+      ? new ZoneRoutes({
+          moments,
+          cache: zoneOgCache,
+          zones: world.zones,
+          listObjectsInZone: (canonicalName) =>
+            world.listObjects().filter((o) => (o.zone ?? '').toLowerCase() === canonicalName),
+          simSpeed: clock.speed,
+          publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+          log: (level, event, fields) => log[level](event, fields),
+          onOgRender: (canonicalName, ip) => {
+            // Mirrors `momentOgRenders` — crawler bots rarely carry the cookie,
+            // so the IP fallback gives us a reasonable per-zone count.
+            stickyMetrics?.recordZoneOgRender(canonicalName, ip);
+          },
+        })
+      : null;
+  if (zoneRoutes) {
+    log.info('zone.ready', {
+      dir: ZONE_OG_CACHE_DIR,
+      ogLruSize: ZONE_OG_LRU_SIZE,
+      zones: world.zones.map((z) => z.name),
+    });
+  }
+
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
       res.writeHead(400);
@@ -890,6 +935,26 @@ async function main(): Promise<void> {
       const outcome = momentsIndexRoutes.handleIndexPage(req, res, url.searchParams);
       if (outcome.status === 200 && stickyMetrics && visitorId && outcome.filterKey !== null) {
         stickyMetrics.recordMomentsIndexView(outcome.filterKey, visitorId);
+      }
+      return;
+    }
+    // Zone OG image MUST come before the /zone/:name HTML page since the
+    // image path shares the `/zone/` prefix.
+    if (zoneRoutes && req.method === 'GET' && url.pathname.startsWith('/zone/')) {
+      const tail = url.pathname.slice('/zone/'.length);
+      if (tail.endsWith('/og.png')) {
+        const rawName = tail.slice(0, -'/og.png'.length);
+        await zoneRoutes.handleZoneOgImage(req, res, rawName);
+        return;
+      }
+      const rawName = tail.replace(/\/$/, '');
+      // Stamp the visitor cookie up-front so dedup keys land on first hit.
+      // Counter bump only on a 200 — rate-limited / 404 hits stay out of
+      // the per-zone dedup set, mirroring the /character/:name flow.
+      const visitorId = stickyMetrics ? resolveVisitor(req, res) : null;
+      const outcome = zoneRoutes.handleZonePage(req, res, rawName);
+      if (outcome.status === 200 && stickyMetrics && visitorId && outcome.canonicalName) {
+        stickyMetrics.recordZoneView(outcome.canonicalName, visitorId);
       }
       return;
     }
