@@ -54,6 +54,7 @@ describe('StickyMetrics.recordShare', () => {
       arcViews: 0,
       arcOgRenders: 0,
       characterOgRenders: 0,
+      momentRailClicks: 0,
     });
     expect(r[0]!.date).toBe('2026-04-17');
   });
@@ -810,6 +811,55 @@ describe('StickyMetrics.recordCharacterOgRender (TINA-882)', () => {
     // Same tuple after reload still dedupes.
     m2.recordCharacterOgRender('mei-tanaka', 'twitterbot');
     expect(m2.rollup(7).at(-1)!.characterOgRenders).toBe(1);
+  });
+});
+
+describe('StickyMetrics.recordMomentRailClick (TINA-952)', () => {
+  test('dedupes per (source moment, visitor) per day', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    // Two visitors clicking the rail on source m1.
+    m.recordMomentRailClick('m1', 'alice');
+    m.recordMomentRailClick('m1', 'bob');
+    // Repeat from alice → deduped.
+    m.recordMomentRailClick('m1', 'alice');
+    // Same alice clicking the rail on a *different* source page → counts.
+    m.recordMomentRailClick('m2', 'alice');
+    expect(m.rollup(7).at(-1)!.momentRailClicks).toBe(3);
+  });
+
+  test('rolls past per-source cap into the floor counter', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-26T10:00:00Z'),
+      maxMomentVisitorsPerDay: 2,
+    });
+    m.recordMomentRailClick('m1', 'a');
+    m.recordMomentRailClick('m1', 'b');
+    m.recordMomentRailClick('m1', 'c'); // overflow → floor
+    m.recordMomentRailClick('m1', 'd'); // overflow → floor
+    expect(m.rollup(7).at(-1)!.momentRailClicks).toBe(4);
+  });
+
+  test('ignores empty inputs', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordMomentRailClick('', 'alice');
+    m.recordMomentRailClick('m1', '');
+    expect(m.rollup(7).at(-1)!.momentRailClicks).toBe(0);
+  });
+
+  test('survives load-write-load with the same dedup state', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-rail-'));
+    const ref = { ms: Date.parse('2026-04-26T10:00:00Z') };
+    const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m1.load();
+    m1.recordMomentRailClick('m1', 'alice');
+    await m1.flush();
+
+    const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m2.load();
+    expect(m2.rollup(7).at(-1)!.momentRailClicks).toBe(1);
+    // Same tuple after reload still dedupes.
+    m2.recordMomentRailClick('m1', 'alice');
+    expect(m2.rollup(7).at(-1)!.momentRailClicks).toBe(1);
   });
 });
 

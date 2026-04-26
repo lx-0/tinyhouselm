@@ -291,9 +291,7 @@ describe('CharacterRoutes.handleCharacterPage', () => {
     expect(res.statusCode).toBe(200);
     // All four OG/Twitter image tags + summary_large_image card.
     expect(res.body).toContain('og:image');
-    expect(res.body).toContain(
-      'https://tinyhouse.up.railway.app/character/mei-tanaka/og.png',
-    );
+    expect(res.body).toContain('https://tinyhouse.up.railway.app/character/mei-tanaka/og.png');
     expect(res.body).toContain('og:image:width" content="1200"');
     expect(res.body).toContain('og:image:height" content="630"');
     expect(res.body).toContain('og:image:type" content="image/png"');
@@ -451,11 +449,7 @@ describe('CharacterRoutes.handleCharacterOgImage (TINA-882)', () => {
   test('fires onOgRender with canonical persona id and request IP', async () => {
     const { routes, ogRenders } = buildOgRoutes();
     const res = mockRes();
-    await routes.handleCharacterOgImage(
-      mockReq({ remoteAddress: '203.0.113.5' }),
-      res,
-      'mei',
-    );
+    await routes.handleCharacterOgImage(mockReq({ remoteAddress: '203.0.113.5' }), res, 'mei');
     expect(res.statusCode).toBe(200);
     expect(ogRenders).toEqual([{ id: 'mei-tanaka', ip: '203.0.113.5' }]);
   });

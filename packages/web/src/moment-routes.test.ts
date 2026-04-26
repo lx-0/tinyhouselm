@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import { type MomentRecord, deriveWorldClock } from '@tina/shared';
 import { RelationshipStore } from '@tina/sim';
 import { describe, expect, test } from 'vitest';
-import { MomentRoutes } from './moment-routes.js';
+import { MomentRoutes, buildRelatedMoments } from './moment-routes.js';
 import { MomentStore } from './moments.js';
 
 function mockReq(opts: {
@@ -495,5 +495,392 @@ describe('MomentRoutes.handleShare', () => {
     await routes.handleShare(mockReq({ method: 'POST', body }), limited);
     expect(limited.statusCode).toBe(429);
     expect(limited.responseHeaders['retry-after']).toBeDefined();
+  });
+});
+
+describe('buildRelatedMoments (TINA-952)', () => {
+  function mkRecord(opts: {
+    id: string;
+    simTime: number;
+    participants: Array<{ id: string; named: boolean }>;
+    zone?: string | null;
+    variant?: 'conversation' | 'group';
+  }): MomentRecord {
+    return {
+      version: 1,
+      id: opts.id,
+      sessionId: `s-${opts.id}`,
+      variant: opts.variant ?? 'conversation',
+      headline: `headline ${opts.id}`,
+      simTime: opts.simTime,
+      clock: deriveWorldClock(opts.simTime, 30),
+      capturedAt: '2026-04-26T00:00:00Z',
+      zone: opts.zone ?? null,
+      participants: opts.participants.map((p) => ({
+        id: p.id,
+        name: p.id.toUpperCase(),
+        named: p.named,
+        color: null,
+      })),
+      transcript: [],
+      openedAt: opts.simTime,
+      closedAt: opts.simTime,
+      closeReason: 'idle',
+      reflection: null,
+    };
+  }
+
+  test('skips the source moment from the candidate set', () => {
+    const source = mkRecord({
+      id: 'src',
+      simTime: 100,
+      participants: [{ id: 'mei', named: true }],
+    });
+    const out = buildRelatedMoments(source, [source], 6);
+    expect(out).toEqual([]);
+  });
+
+  test('tier 1 wins over tier 2 wins over tier 3 wins over tier 4', () => {
+    const day = 86400;
+    const source = mkRecord({
+      id: 'src',
+      simTime: 5 * day + 100,
+      participants: [
+        { id: 'mei', named: true },
+        { id: 'hiro', named: true },
+      ],
+      zone: 'cafe',
+    });
+    // Tier 1: shares ALL named (mei + hiro).
+    const t1 = mkRecord({
+      id: 't1',
+      simTime: 5 * day + 50,
+      participants: [
+        { id: 'mei', named: true },
+        { id: 'hiro', named: true },
+      ],
+      zone: 'park',
+    });
+    // Tier 2: shares only mei.
+    const t2 = mkRecord({
+      id: 't2',
+      simTime: 5 * day + 90,
+      participants: [
+        { id: 'mei', named: true },
+        { id: 'kenji', named: true },
+      ],
+      zone: 'forge',
+    });
+    // Tier 3: same zone, no named overlap.
+    const t3 = mkRecord({
+      id: 't3',
+      simTime: 5 * day + 95,
+      participants: [{ id: 'ava', named: true }],
+      zone: 'cafe',
+    });
+    // Tier 4: adjacent sim-day, different zone, no overlap.
+    const t4 = mkRecord({
+      id: 't4',
+      simTime: 6 * day + 10,
+      participants: [{ id: 'bruno', named: true }],
+      zone: 'docks',
+    });
+    // Reject: 5 sim-days away, different zone, no overlap.
+    const reject = mkRecord({
+      id: 'rej',
+      simTime: 10 * day,
+      participants: [{ id: 'kenji', named: true }],
+      zone: 'docks',
+    });
+    const out = buildRelatedMoments(source, [source, t4, t3, t2, t1, reject], 6);
+    expect(out.map((m) => m.id)).toEqual(['t1', 't2', 't3', 't4']);
+  });
+
+  test('tiebreak inside a tier: freshest first, then id ascending', () => {
+    const source = mkRecord({
+      id: 'src',
+      simTime: 100,
+      participants: [{ id: 'mei', named: true }],
+    });
+    // Two candidates share Mei (tier 2), same simTime → id ascending.
+    const a = mkRecord({
+      id: 'aaa',
+      simTime: 80,
+      participants: [{ id: 'mei', named: true }],
+    });
+    const b = mkRecord({
+      id: 'bbb',
+      simTime: 80,
+      participants: [{ id: 'mei', named: true }],
+    });
+    // Fresher tier-2 candidate.
+    const c = mkRecord({
+      id: 'ccc',
+      simTime: 90,
+      participants: [{ id: 'mei', named: true }],
+    });
+    const out = buildRelatedMoments(source, [source, b, a, c], 6);
+    expect(out.map((m) => m.id)).toEqual(['ccc', 'aaa', 'bbb']);
+  });
+
+  test('procedural-only source falls back to zone + adjacent-day tiers', () => {
+    const day = 86400;
+    const source = mkRecord({
+      id: 'proc-src',
+      simTime: 5 * day,
+      participants: [{ id: 'fill1', named: false }],
+      zone: 'cafe',
+    });
+    // Tier 3: same zone.
+    const z = mkRecord({
+      id: 'zzz',
+      simTime: 5 * day - 60,
+      participants: [{ id: 'fill2', named: false }],
+      zone: 'cafe',
+    });
+    // Tier 4: adjacent day.
+    const adj = mkRecord({
+      id: 'adj',
+      simTime: 4 * day + 100,
+      participants: [{ id: 'fill3', named: false }],
+      zone: 'park',
+    });
+    // No overlap at all.
+    const reject = mkRecord({
+      id: 'rej',
+      simTime: 9 * day,
+      participants: [{ id: 'fill4', named: false }],
+      zone: 'park',
+    });
+    const out = buildRelatedMoments(source, [source, z, adj, reject], 6);
+    expect(out.map((m) => m.id)).toEqual(['zzz', 'adj']);
+  });
+
+  test('group source matches a group candidate sharing all named participants', () => {
+    const source = mkRecord({
+      id: 'src',
+      simTime: 100,
+      participants: [
+        { id: 'mei', named: true },
+        { id: 'hiro', named: true },
+        { id: 'ava', named: true },
+      ],
+      zone: 'square',
+      variant: 'group',
+    });
+    // Tier 1: includes all three named (plus an extra).
+    const t1 = mkRecord({
+      id: 't1',
+      simTime: 50,
+      participants: [
+        { id: 'mei', named: true },
+        { id: 'hiro', named: true },
+        { id: 'ava', named: true },
+        { id: 'kenji', named: true },
+      ],
+      zone: 'park',
+      variant: 'group',
+    });
+    // Tier 2: only two of the three.
+    const t2 = mkRecord({
+      id: 't2',
+      simTime: 80,
+      participants: [
+        { id: 'mei', named: true },
+        { id: 'hiro', named: true },
+      ],
+      zone: 'docks',
+    });
+    const out = buildRelatedMoments(source, [source, t2, t1], 6);
+    expect(out.map((m) => m.id)).toEqual(['t1', 't2']);
+  });
+
+  test('caps the result set at max', () => {
+    const source = mkRecord({
+      id: 'src',
+      simTime: 100,
+      participants: [{ id: 'mei', named: true }],
+    });
+    const candidates: MomentRecord[] = [];
+    for (let i = 0; i < 20; i++) {
+      candidates.push(
+        mkRecord({
+          id: `c${i.toString().padStart(2, '0')}`,
+          simTime: 50 - i,
+          participants: [{ id: 'mei', named: true }],
+        }),
+      );
+    }
+    const out = buildRelatedMoments(source, [source, ...candidates], 6);
+    expect(out).toHaveLength(6);
+  });
+});
+
+describe('MomentRoutes.handleMomentPage rail rendering (TINA-952)', () => {
+  test('omits the rail entirely when fewer than 2 candidates exist', () => {
+    const store = new MomentStore({
+      maxMoments: 10,
+      idGenerator: (() => {
+        let n = 0;
+        return () => `m${++n}`;
+      })(),
+    });
+    // Single moment in the store → no candidates. Rail must omit.
+    store.captureClose(
+      {
+        sessionId: 's1',
+        simTime: 100,
+        openedAt: 90,
+        transcript: [{ speakerId: 'mei', text: 'hi', at: 90 }],
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: '#ffaaaa' },
+          { id: 'hiro', name: 'Hiro', named: true, color: '#aaffff' },
+        ],
+        zone: 'cafe',
+        closeReason: 'idle',
+      },
+      deriveWorldClock(100, 30),
+    );
+    const routes = new MomentRoutes({ store, checkAdmin: alwaysOk });
+    const res = mockRes();
+    routes.handleMomentPage(res, 'm1');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain('class="related"');
+    expect(res.body).not.toContain('Related moments');
+  });
+
+  test('renders the rail with cards linking back via ?from= when ≥2 candidates exist', () => {
+    const store = new MomentStore({
+      maxMoments: 10,
+      idGenerator: (() => {
+        let n = 0;
+        return () => `r${++n}`;
+      })(),
+    });
+    // Source: r1
+    store.captureClose(
+      {
+        sessionId: 'src',
+        simTime: 100,
+        openedAt: 80,
+        transcript: [{ speakerId: 'mei', text: 'hi', at: 80 }],
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: '#ffaaaa' },
+          { id: 'hiro', name: 'Hiro', named: true, color: '#aaffff' },
+        ],
+        zone: 'cafe',
+        closeReason: 'idle',
+      },
+      deriveWorldClock(100, 30),
+    );
+    // r2 — shares Mei + Hiro (tier 1)
+    store.captureClose(
+      {
+        sessionId: 's2',
+        simTime: 200,
+        openedAt: 180,
+        transcript: [{ speakerId: 'mei', text: 'hello again', at: 180 }],
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: '#ffaaaa' },
+          { id: 'hiro', name: 'Hiro', named: true, color: '#aaffff' },
+        ],
+        zone: 'park',
+        closeReason: 'idle',
+      },
+      deriveWorldClock(200, 30),
+    );
+    // r3 — shares only Mei (tier 2)
+    store.captureClose(
+      {
+        sessionId: 's3',
+        simTime: 300,
+        openedAt: 280,
+        transcript: [{ speakerId: 'mei', text: 'something', at: 280 }],
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: '#ffaaaa' },
+          { id: 'kenji', name: 'Kenji', named: true, color: '#88ff88' },
+        ],
+        zone: 'forge',
+        closeReason: 'idle',
+      },
+      deriveWorldClock(300, 30),
+    );
+    const routes = new MomentRoutes({ store, checkAdmin: alwaysOk });
+    const res = mockRes();
+    routes.handleMomentPage(res, 'r1');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('class="related"');
+    expect(res.body).toContain('Related moments');
+    expect(res.body).toContain('class="related-card"');
+    // The rail card link must include ?from=<sourceId> so server-side
+    // accounting can dedupe per (source, IP, day).
+    expect(res.body).toContain('href="/moment/r2?from=r1"');
+    expect(res.body).toContain('href="/moment/r3?from=r1"');
+    // Source itself must NOT appear in the rail.
+    expect(res.body).not.toContain('href="/moment/r1?from=r1"');
+  });
+
+  test('rail card carries a sd-N badge and a group · N badge for group variants', () => {
+    const store = new MomentStore({
+      maxMoments: 10,
+      idGenerator: (() => {
+        let n = 0;
+        return () => `g${++n}`;
+      })(),
+    });
+    const day = 86400;
+    // Source: g1 (conversation, simDay 4).
+    store.captureClose(
+      {
+        sessionId: 'src',
+        simTime: 4 * day + 100,
+        openedAt: 4 * day + 80,
+        transcript: [{ speakerId: 'mei', text: 'hi', at: 4 * day + 80 }],
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: '#ffaaaa' },
+          { id: 'hiro', name: 'Hiro', named: true, color: '#aaffff' },
+        ],
+        zone: 'cafe',
+        closeReason: 'idle',
+      },
+      deriveWorldClock(4 * day + 100, 30),
+    );
+    // g2 — shares both named (tier 1), same sim-day, group variant.
+    store.captureGroup(
+      {
+        sessionId: 'g-grp',
+        simTime: 4 * day + 200,
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: '#ffaaaa' },
+          { id: 'hiro', name: 'Hiro', named: true, color: '#aaffff' },
+          { id: 'ava', name: 'Ava', named: true, color: '#ffee88' },
+        ],
+        zone: 'park',
+      },
+      deriveWorldClock(4 * day + 200, 30),
+    );
+    // g3 — shares only Mei (tier 2).
+    store.captureClose(
+      {
+        sessionId: 's3',
+        simTime: 4 * day + 50,
+        openedAt: 4 * day + 30,
+        transcript: [{ speakerId: 'mei', text: 'hi', at: 4 * day + 30 }],
+        participants: [
+          { id: 'mei', name: 'Mei', named: true, color: '#ffaaaa' },
+          { id: 'kenji', name: 'Kenji', named: true, color: '#88ff88' },
+        ],
+        zone: 'forge',
+        closeReason: 'idle',
+      },
+      deriveWorldClock(4 * day + 50, 30),
+    );
+    const routes = new MomentRoutes({ store, checkAdmin: alwaysOk });
+    const res = mockRes();
+    routes.handleMomentPage(res, 'g1');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('sd-4');
+    // The group candidate has 3 named participants → badge should read "group · 3".
+    expect(res.body).toContain('group · 3');
   });
 });

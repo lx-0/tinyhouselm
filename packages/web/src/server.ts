@@ -971,6 +971,15 @@ async function main(): Promise<void> {
         if (stickyMetrics) {
           const visitorId = resolveVisitor(req, res);
           stickyMetrics.recordMomentVisit(visitorId);
+          // Related-moments rail click telemetry (TINA-952). The rail link
+          // appends `?from=<sourceMomentId>`; we bump the per-source counter
+          // here so the dedup runs before the page render. Self-referential
+          // `from` (somehow visiting your own page from your own rail) and
+          // ill-formed ids are ignored — the counter only counts real hops.
+          const fromId = url.searchParams.get('from');
+          if (fromId && fromId !== id && /^[A-Za-z0-9_-]{1,64}$/.test(fromId)) {
+            stickyMetrics.recordMomentRailClick(fromId, visitorId || requestIp(req));
+          }
         }
         momentRoutes.handleMomentPage(res, id, url.pathname);
         return;

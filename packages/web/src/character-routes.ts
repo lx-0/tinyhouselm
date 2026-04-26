@@ -280,9 +280,7 @@ export class CharacterRoutes {
         name: persona.manifest.name,
         color: persona.manifest.glyph.color,
         bio: persona.manifest.bio,
-        arc: arcs[0]
-          ? { label: arcs[0].label, otherName: arcs[0].other.name }
-          : null,
+        arc: arcs[0] ? { label: arcs[0].label, otherName: arcs[0].other.name } : null,
         headline: freshest?.headline ?? '',
         variant: freshest?.variant ?? null,
         participantCount: freshest?.participants.length ?? 0,

@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { MomentRecord } from '@tina/shared';
+import type { MomentParticipant, MomentRecord } from '@tina/shared';
 import { type ArcLabel, type NudgeDirection, type RelationshipStore, simDay } from '@tina/sim';
 import type { MomentStore } from './moments.js';
 
@@ -120,6 +120,7 @@ export class MomentRoutes {
     const arc = this.resolveArc(rec);
     const nudge = this.resolveNudge(rec);
     const groupArcs = this.resolveGroupArcs(rec);
+    const related = buildRelatedMoments(rec, this.store.list(), 6);
     const html = renderMomentHtml(
       rec,
       this.buildCanonicalUrl(canonicalPath ?? `/moment/${id}`),
@@ -127,6 +128,7 @@ export class MomentRoutes {
       arc,
       nudge,
       groupArcs,
+      related,
     );
     writeHtml(res, 200, html);
   }
@@ -375,6 +377,64 @@ export function buildMomentDescription(rec: MomentRecord, max = 160): string {
   return truncate(lines.join(' · '), max);
 }
 
+/**
+ * Build the deterministic "Related moments" rail for the source moment
+ * (TINA-952). Tier-based ranking, no LLM, pure read-side aggregation:
+ *   1. Shares ALL named participants of the source moment (strongest match).
+ *   2. Shares ≥1 named participant.
+ *   3. Same zone.
+ *   4. Adjacent sim-day (±1).
+ * Tiebreak inside a tier: freshest first, then id ascending. The source moment
+ * itself is always skipped. Returns up to `max` candidates from the
+ * concatenated tiers; an empty result means the rail should be omitted.
+ */
+export function buildRelatedMoments(
+  source: MomentRecord,
+  all: MomentRecord[],
+  max: number,
+): MomentRecord[] {
+  if (max <= 0) return [];
+  const sourceNamed = new Set(source.participants.filter((p) => p.named).map((p) => p.id));
+  const sourceZone = source.zone?.toLowerCase() ?? null;
+  const sourceDay = simDay(source.simTime);
+  const tiers: MomentRecord[][] = [[], [], [], []];
+  for (const cand of all) {
+    if (cand.id === source.id) continue;
+    const candNamed = cand.participants.filter((p) => p.named).map((p) => p.id);
+    let overlap = 0;
+    for (const id of candNamed) if (sourceNamed.has(id)) overlap += 1;
+    if (sourceNamed.size > 0 && overlap === sourceNamed.size) {
+      tiers[0]!.push(cand);
+      continue;
+    }
+    if (overlap >= 1) {
+      tiers[1]!.push(cand);
+      continue;
+    }
+    if (sourceZone && cand.zone && cand.zone.toLowerCase() === sourceZone) {
+      tiers[2]!.push(cand);
+      continue;
+    }
+    const candDay = simDay(cand.simTime);
+    if (Math.abs(candDay - sourceDay) === 1) {
+      tiers[3]!.push(cand);
+    }
+  }
+  const cmp = (a: MomentRecord, b: MomentRecord): number => {
+    if (b.simTime !== a.simTime) return b.simTime - a.simTime;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  };
+  const out: MomentRecord[] = [];
+  for (const tier of tiers) {
+    tier.sort(cmp);
+    for (const m of tier) {
+      if (out.length >= max) return out;
+      out.push(m);
+    }
+  }
+  return out;
+}
+
 function renderMomentHtml(
   rec: MomentRecord,
   canonical: string,
@@ -382,6 +442,7 @@ function renderMomentHtml(
   arc: ArcTag | null,
   nudge: NudgeTag | null,
   groupArcs: ArcTag[] = [],
+  related: MomentRecord[] = [],
 ): string {
   const title = escapeHtml(rec.headline);
   const description = escapeHtml(buildMomentDescription(rec));
@@ -448,6 +509,15 @@ function renderMomentHtml(
         .join('')}</div>`
     : '';
 
+  // Related moments rail (TINA-952). Spec: render only when ≥2 candidates
+  // exist across all tiers; below that, omit the section entirely.
+  const relatedHtml =
+    related.length >= 2
+      ? `<section class="related"><h3>Related moments</h3><div class="related-rail">${related
+          .map((m) => renderRelatedCard(m, rec.id))
+          .join('')}</div></section>`
+      : '';
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -504,6 +574,18 @@ function renderMomentHtml(
     .reflection { margin-top: 22px; padding: 14px 16px; border: 1px solid rgba(185,176,220,0.25); border-radius: 8px; background: rgba(185,176,220,0.06); }
     .reflection h3 { margin: 0 0 6px; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: #b9b0dc; }
     .reflection p { margin: 0; font-size: 13px; line-height: 1.55; color: #d6d0e6; }
+    .related { margin-top: 28px; }
+    .related h3 { margin: 0 0 10px; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: #b9b0dc; }
+    .related-rail { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+    .related-card { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(255,255,255,0.02); text-decoration: none; color: inherit; }
+    .related-card:hover { border-color: rgba(185,176,220,0.35); background: rgba(185,176,220,0.05); }
+    .related-card .rc-glyphs { display: flex; gap: 4px; flex-wrap: wrap; }
+    .related-card .rc-sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; box-shadow: 0 0 0 1px rgba(255,255,255,0.06) inset; }
+    .related-card .rc-sw.named { box-shadow: 0 0 0 2px #f5c97a; }
+    .related-card .rc-headline { font-size: 13px; line-height: 1.35; color: #e7e5ee; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+    .related-card .rc-meta { display: flex; gap: 6px; flex-wrap: wrap; font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: #8888aa; }
+    .related-card .rc-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 999px; background: rgba(255,255,255,0.05); color: #b9b0dc; }
+    .related-card .rc-badge.group { background: rgba(185,176,220,0.16); color: #e2d8f3; }
     footer { margin-top: 32px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #55556a; }
   </style>
 </head>
@@ -524,10 +606,37 @@ function renderMomentHtml(
         : `<div class="transcript">${turnsHtml || '<div class="turn" style="opacity:0.6">(no transcript captured)</div>'}</div>`
     }
     ${reflectionHtml}
+    ${relatedHtml}
     <footer>moment id · ${escapeHtml(rec.id)} · <a href="/digest/sd-${simDay(rec.simTime)}">← back to sim-day ${simDay(rec.simTime)} digest</a></footer>
   </main>
 </body>
 </html>`;
+}
+
+/**
+ * Render a single rail card (TINA-952). Each card carries a participant-glyph
+ * row (gold halo for named), the deterministic headline truncated by CSS to a
+ * single line, a sim-day badge, and a `group · N` badge for group-variant
+ * moments. The link includes `?from=<sourceId>` so server-side accounting can
+ * dedupe rail-driven clicks per (source moment, IP, day).
+ */
+function renderRelatedCard(m: MomentRecord, sourceId: string): string {
+  const glyphs = m.participants
+    .slice(0, 6)
+    .map((p) => participantSwatch(p))
+    .join('');
+  const day = simDay(m.simTime);
+  const isGroup = m.variant === 'group';
+  const groupBadge = isGroup
+    ? `<span class="rc-badge group">group · ${m.participants.length}</span>`
+    : '';
+  return `<a class="related-card" href="/moment/${escapeHtml(m.id)}?from=${escapeHtml(sourceId)}"><div class="rc-glyphs">${glyphs}</div><div class="rc-headline">${escapeHtml(m.headline)}</div><div class="rc-meta"><span class="rc-badge">sd-${day}</span>${groupBadge}</div></a>`;
+}
+
+function participantSwatch(p: MomentParticipant): string {
+  const color = p.color ?? '#b9b0dc';
+  const cls = p.named ? 'rc-sw named' : 'rc-sw';
+  return `<span class="${cls}" style="background:${escapeHtml(color)}" title="${escapeHtml(p.name)}"></span>`;
 }
 
 function notFoundPage(): string {
