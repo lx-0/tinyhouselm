@@ -4,6 +4,7 @@ import {
   OG_HEIGHT,
   OG_WIDTH,
   PixelCanvas,
+  composeArcOg,
   composeMomentOg,
   composeZoneOg,
   encodePng,
@@ -253,6 +254,72 @@ describe('composeZoneOg', () => {
   test('different zone names produce different bytes', () => {
     const a = composeZoneOg({ zone: 'cafe', headline: '', momentsCount: 0, participants: [] });
     const b = composeZoneOg({ zone: 'park', headline: '', momentsCount: 0, participants: [] });
+    expect(a.equals(b)).toBe(false);
+  });
+});
+
+describe('composeArcOg', () => {
+  test('renders a 1200x630 PNG for a populated pair', () => {
+    const png = composeArcOg({
+      a: { name: 'Hiro Abe', color: '#aaffff' },
+      b: { name: 'Mei Tanaka', color: '#ffaaaa' },
+      arcLabel: 'warming',
+      affinity: 0.42,
+      headline: 'Mei and Hiro caught up at the counter',
+    });
+    expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    expect(png.readUInt32BE(16)).toBe(OG_WIDTH);
+    expect(png.readUInt32BE(20)).toBe(OG_HEIGHT);
+  });
+
+  test('is deterministic — same input produces the same bytes', () => {
+    const input = {
+      a: { name: 'Hiro Abe', color: '#aaffff' },
+      b: { name: 'Mei Tanaka', color: '#ffaaaa' },
+      arcLabel: 'cooling',
+      affinity: -0.18,
+      headline: 'a tense lull at the cafe',
+    };
+    const a = composeArcOg(input);
+    const b = composeArcOg(input);
+    expect(a.equals(b)).toBe(true);
+  });
+
+  test('falls back gracefully on an empty headline', () => {
+    const png = composeArcOg({
+      a: { name: 'Hiro', color: null },
+      b: { name: 'Mei', color: null },
+      arcLabel: 'new',
+      affinity: 0,
+      headline: '',
+    });
+    expect(png.length).toBeGreaterThan(1000);
+    // Different from the populated case so OG cache keys behave correctly.
+    const populated = composeArcOg({
+      a: { name: 'Hiro', color: null },
+      b: { name: 'Mei', color: null },
+      arcLabel: 'new',
+      affinity: 0,
+      headline: 'they spoke for the first time',
+    });
+    expect(png.equals(populated)).toBe(false);
+  });
+
+  test('different arc labels produce different bytes', () => {
+    const a = composeArcOg({
+      a: { name: 'Hiro', color: '#aaffff' },
+      b: { name: 'Mei', color: '#ffaaaa' },
+      arcLabel: 'warming',
+      affinity: 0.4,
+      headline: 'shared a meal',
+    });
+    const b = composeArcOg({
+      a: { name: 'Hiro', color: '#aaffff' },
+      b: { name: 'Mei', color: '#ffaaaa' },
+      arcLabel: 'cooling',
+      affinity: 0.4,
+      headline: 'shared a meal',
+    });
     expect(a.equals(b)).toBe(false);
   });
 });

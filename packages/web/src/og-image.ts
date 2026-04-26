@@ -725,3 +725,131 @@ export function composeZoneOg(input: ZoneOgInput): Buffer {
 
   return encodePng(OG_WIDTH, OG_HEIGHT, c.buf);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Pair-arc OG composition (TINA-813)                                          */
+/* -------------------------------------------------------------------------- */
+
+export interface ArcOgInput {
+  /** First named character. Order is canonical (sorted by id ascending). */
+  a: { name: string; color: string | null };
+  /** Second named character. */
+  b: { name: string; color: string | null };
+  /** Arc label — `warming` / `cooling` / etc. Uppercased before rendering. */
+  arcLabel: string;
+  /** Affinity in [-1, +1]. Surfaced in the footer chip. */
+  affinity: number;
+  /**
+   * Freshest moment headline for this pair, optional. Empty string falls back
+   * to a quiet "no moments yet" line so social-card crawlers always get
+   * something useful.
+   */
+  headline: string;
+}
+
+/**
+ * Compose a 1200×630 PNG card for a named×named arc page. Reuses the moment/
+ * digest/zone chrome (panel bars + accent palette) but swaps in a `TINA · ARC`
+ * header, the arc-label sub-chip, both glyphs centered with halos, and a
+ * footer that combines the affinity score with the freshest moment headline.
+ * Deterministic — same input produces identical bytes, which is what the OG
+ * cache key relies on.
+ */
+export function composeArcOg(input: ArcOgInput): Buffer {
+  const c = new PixelCanvas(OG_WIDTH, OG_HEIGHT);
+  c.fill(BG);
+
+  // Header bar.
+  c.fillRect(0, 0, OG_WIDTH, 80, PANEL);
+  c.drawText(48, 32, 'TINA · ARC', ACCENT, 4);
+  const arcChip = normalizeForFont(input.arcLabel.toUpperCase());
+  const arcChipWidth = measureText(arcChip, 3);
+  c.drawText(OG_WIDTH - arcChipWidth - 48, 36, arcChip, HALO, 3);
+
+  // Footer bar.
+  c.fillRect(0, OG_HEIGHT - 80, OG_WIDTH, 80, PANEL);
+  c.drawText(48, OG_HEIGHT - 50, 'TINA · TINYHOUSE', ACCENT, 3);
+  const affChip = normalizeForFont(formatAffinityForOg(input.affinity));
+  const affChipWidth = measureText(affChip, 3);
+  c.drawText(OG_WIDTH - affChipWidth - 48, OG_HEIGHT - 50, affChip, MUTED, 3);
+
+  // Two large glyphs centered horizontally with halos. Names underneath.
+  const glyphRadius = 64;
+  const haloRadius = glyphRadius + 12;
+  const glyphSpacing = 320;
+  const cy = 230;
+  const cxA = Math.floor(OG_WIDTH / 2 - glyphSpacing / 2);
+  const cxB = Math.floor(OG_WIDTH / 2 + glyphSpacing / 2);
+
+  drawArcGlyph(c, input.a, cxA, cy, glyphRadius, haloRadius);
+  drawArcGlyph(c, input.b, cxB, cy, glyphRadius, haloRadius);
+
+  // Ampersand between the two glyphs — chunky pixel-art "&" at scale 6.
+  const amp = '&';
+  const ampScale = 6;
+  const ampW = measureText(amp, ampScale);
+  const ampH = FONT_HEIGHT * ampScale;
+  c.drawText(Math.floor(OG_WIDTH / 2 - ampW / 2), cy - Math.floor(ampH / 2), amp, HALO, ampScale);
+
+  // Headline below — fresh moment, wrapped to 2 lines. Falls back to a quiet
+  // "no moments yet" line so empty pairs still produce a readable card.
+  const headlineSource =
+    input.headline.trim() || `${input.a.name} and ${input.b.name} have no moments yet`;
+  const headline = normalizeForFont(headlineSource.toUpperCase());
+  const headlineScale = 4;
+  const headlineLineHeight = FONT_HEIGHT * headlineScale + 12;
+  const headlineMaxPx = OG_WIDTH - 96;
+  const lines = wrapText(headline, headlineMaxPx, headlineScale, 2);
+  const headlineBlockHeight = lines.length * headlineLineHeight - 12;
+  const headlineY = OG_HEIGHT - 80 - 40 - headlineBlockHeight;
+  for (let i = 0; i < lines.length; i++) {
+    const lineW = measureText(lines[i]!, headlineScale);
+    c.drawText(
+      Math.floor((OG_WIDTH - lineW) / 2),
+      headlineY + i * headlineLineHeight,
+      lines[i]!,
+      FG,
+      headlineScale,
+    );
+  }
+
+  return encodePng(OG_WIDTH, OG_HEIGHT, c.buf);
+}
+
+function drawArcGlyph(
+  c: PixelCanvas,
+  p: { name: string; color: string | null },
+  cx: number,
+  cy: number,
+  glyphRadius: number,
+  haloRadius: number,
+): void {
+  const color = participantColor(p.color);
+  // Both sides of an arc are named characters — always draw the gold halo.
+  c.strokeCircle(cx, cy, haloRadius, glyphRadius + 2, HALO);
+  c.fillCircle(cx, cy, glyphRadius, color);
+  const initial = (p.name[0] ?? '?').toUpperCase();
+  const initialScale = 7;
+  const initialW = measureText(initial, initialScale);
+  const initialH = FONT_HEIGHT * initialScale;
+  c.drawText(
+    cx - Math.floor(initialW / 2),
+    cy - Math.floor(initialH / 2),
+    initial,
+    BG,
+    initialScale,
+  );
+  // Display name underneath (full name; truncated by font normalization).
+  const name = normalizeForFont(p.name.toUpperCase());
+  const nameScale = 3;
+  const nameW = measureText(name, nameScale);
+  c.drawText(cx - Math.floor(nameW / 2), cy + haloRadius + 24, name, FG, nameScale);
+}
+
+/** Format affinity in [-1, +1] as a chunky chip like `AFFINITY +0.42`. */
+function formatAffinityForOg(a: number): string {
+  const clamped = Math.max(-1, Math.min(1, a));
+  const sign = clamped >= 0 ? '+' : '-';
+  const abs = Math.abs(clamped).toFixed(2);
+  return `AFFINITY ${sign}${abs}`;
+}

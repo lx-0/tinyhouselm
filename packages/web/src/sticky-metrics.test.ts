@@ -51,6 +51,8 @@ describe('StickyMetrics.recordShare', () => {
       digestOgRenders: 0,
       zoneViews: 0,
       zoneOgRenders: 0,
+      arcViews: 0,
+      arcOgRenders: 0,
     });
     expect(r[0]!.date).toBe('2026-04-17');
   });
@@ -695,6 +697,72 @@ describe('StickyMetrics.recordZoneOgRender (TINA-744)', () => {
     m.recordZoneOgRender('cafe', 'slackbot');
     m.recordZoneOgRender('park', 'twitterbot'); // different zone, twitterbot counts again
     expect(m.rollup(7).at(-1)!.zoneOgRenders).toBe(3);
+  });
+});
+
+describe('StickyMetrics.recordArcView (TINA-813)', () => {
+  test('dedupes by (slug, visitor) per UTC day', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordArcView('hiro-mei', 'alice');
+    m.recordArcView('hiro-mei', 'alice'); // dedup
+    m.recordArcView('hiro-mei', 'bob');
+    m.recordArcView('ava-mei', 'alice'); // different pair, alice counts again
+    expect(m.rollup(7).at(-1)!.arcViews).toBe(3);
+  });
+
+  test('case-insensitive slug key dedup', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordArcView('Hiro-Mei', 'alice');
+    m.recordArcView('HIRO-MEI', 'alice'); // same canonical key — dedup
+    expect(m.rollup(7).at(-1)!.arcViews).toBe(1);
+  });
+
+  test('caps the per-pair dedup set and floors overflow', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-26T10:00:00Z'),
+      maxMomentVisitorsPerDay: 2,
+    });
+    m.recordArcView('hiro-mei', 'a');
+    m.recordArcView('hiro-mei', 'b');
+    m.recordArcView('hiro-mei', 'c'); // floors
+    m.recordArcView('hiro-mei', 'd'); // floors
+    expect(m.rollup(7).at(-1)!.arcViews).toBe(4);
+  });
+
+  test('ignores empty inputs', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordArcView('', 'alice');
+    m.recordArcView('hiro-mei', '');
+    expect(m.rollup(7).at(-1)!.arcViews).toBe(0);
+  });
+
+  test('persists across a load-write-load cycle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-arc-'));
+    const ref = { ms: Date.parse('2026-04-26T10:00:00Z') };
+    const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m1.load();
+    m1.recordArcView('hiro-mei', 'alice');
+    m1.recordArcOgRender('hiro-mei', 'twitterbot');
+    await m1.flush();
+
+    const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m2.load();
+    expect(m2.rollup(7).at(-1)!.arcViews).toBe(1);
+    expect(m2.rollup(7).at(-1)!.arcOgRenders).toBe(1);
+    // Same tuple after reload still dedupes.
+    m2.recordArcView('hiro-mei', 'alice');
+    expect(m2.rollup(7).at(-1)!.arcViews).toBe(1);
+  });
+});
+
+describe('StickyMetrics.recordArcOgRender (TINA-813)', () => {
+  test('aggregates per-pair dedup into one rollup counter', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordArcOgRender('hiro-mei', 'twitterbot');
+    m.recordArcOgRender('hiro-mei', 'twitterbot'); // dedup
+    m.recordArcOgRender('hiro-mei', 'slackbot');
+    m.recordArcOgRender('ava-mei', 'twitterbot'); // different pair, twitterbot counts again
+    expect(m.rollup(7).at(-1)!.arcOgRenders).toBe(3);
   });
 });
 

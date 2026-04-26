@@ -385,7 +385,10 @@ function renderCharacterHtmlBody(persona: NamedPersona, input: RenderInput): str
     : '';
 
   const scheduleHtml = renderScheduleStrip(input.schedule);
-  const arcsHtml = renderArcsRow(input.arcs);
+  const arcsHtml = renderArcsRow(input.arcs, {
+    id: persona.manifest.id,
+    name: persona.manifest.name,
+  });
   const momentsHtml = renderMomentsList(persona.manifest.id, input.moments, input.simSpeed);
   const affordancesHtml = renderAffordancesList(input.affordances, input.simSpeed);
 
@@ -510,16 +513,32 @@ function renderScheduleStrip(schedule: ScheduleEntry[]): string {
   return `<div class="schedule">${cells.join('')}</div>`;
 }
 
-function renderArcsRow(arcs: ArcRow[]): string {
+function renderArcsRow(arcs: ArcRow[], self: { id: string; name: string }): string {
   if (arcs.length === 0) {
     return '<div class="empty">No tracked relationships yet.</div>';
   }
   return `<div class="arcs">${arcs
-    .map(
-      (a) =>
-        `<span class="arc-chip" data-arc="${escapeHtml(a.label)}"><span class="glyph">${escapeHtml(ARC_GLYPHS[a.label])}</span><span>${escapeHtml(a.label)} · ${escapeHtml(a.other.name)}</span></span>`,
-    )
+    .map((a) => {
+      const slug = arcPairSlug(self, a.other);
+      const inner = `<span class="glyph">${escapeHtml(ARC_GLYPHS[a.label])}</span><span>${escapeHtml(a.label)} · ${escapeHtml(a.other.name)}</span>`;
+      return `<a class="arc-chip" data-arc="${escapeHtml(a.label)}" href="/arc/${escapeHtml(slug)}">${inner}</a>`;
+    })
     .join('')}</div>`;
+}
+
+/**
+ * Build the canonical pair slug for the /arc page from two named personas.
+ * Mirrors the resolver in arc-routes.ts: canonical order is id-ascending,
+ * the slug uses each side's first-name lowercased.
+ */
+function arcPairSlug(a: { id: string; name: string }, b: { id: string; name: string }): string {
+  const [first, second] = a.id < b.id ? [a, b] : [b, a];
+  return `${firstNameSlug(first.name)}-${firstNameSlug(second.name)}`;
+}
+
+function firstNameSlug(displayName: string): string {
+  const head = displayName.split(/\s+/, 1)[0] ?? displayName;
+  return head.toLowerCase();
 }
 
 function renderMomentsList(selfId: string, moments: MomentRecord[], simSpeed: number): string {

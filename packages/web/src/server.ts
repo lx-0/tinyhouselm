@@ -21,6 +21,7 @@ import {
   seededRng,
 } from '@tina/sim';
 import { build as esbuild } from 'esbuild';
+import { ArcRoutes } from './arc-routes.js';
 import { createBudget, resolveBudgetCap } from './budget.js';
 import { CharacterRoutes } from './character-routes.js';
 import { DigestRoutes } from './digest-routes.js';
@@ -121,6 +122,15 @@ const ZONE_OG_CACHE_DIR = isAbsolute(ZONE_OG_CACHE_DIR_ENV)
   ? ZONE_OG_CACHE_DIR_ENV
   : resolve(process.cwd(), ZONE_OG_CACHE_DIR_ENV);
 const ZONE_OG_LRU_SIZE = Number(process.env.ZONE_OG_LRU_SIZE ?? 64);
+
+// Per-pair arc page (TINA-813). One OG image per named×named pair — for the
+// 5-character starter roster that's at most 10 pairs, but tunable for larger
+// rosters via env so a future "second town" still fits.
+const ARC_OG_CACHE_DIR_ENV = process.env.ARC_OG_CACHE_DIR ?? './data/arc-og-cache';
+const ARC_OG_CACHE_DIR = isAbsolute(ARC_OG_CACHE_DIR_ENV)
+  ? ARC_OG_CACHE_DIR_ENV
+  : resolve(process.cwd(), ARC_OG_CACHE_DIR_ENV);
+const ARC_OG_LRU_SIZE = Number(process.env.ARC_OG_LRU_SIZE ?? 64);
 
 // Multi-character group co-presence moments (TINA-345).
 const GROUP_MOMENTS_ENABLED =
@@ -839,6 +849,44 @@ async function main(): Promise<void> {
     });
   }
 
+  // Per-pair arc page (TINA-813). Reads from MomentRecord LRU + RelationshipStore
+  // — no new persistence, no LLM, no sim hot-path. OG cached in its own
+  // disk-LRU keyed by canonical pair slug.
+  const arcOgCache =
+    moments && relationships
+      ? new OgCache({
+          dir: ARC_OG_CACHE_DIR,
+          maxEntries: ARC_OG_LRU_SIZE,
+          log: (level, event, fields) => log[level](event, fields),
+        })
+      : null;
+  const arcRoutes =
+    moments && relationships && arcOgCache
+      ? new ArcRoutes({
+          named,
+          moments,
+          cache: arcOgCache,
+          relationships,
+          isSessionNudged,
+          simSpeed: clock.speed,
+          currentSimTime: () => world.simTime,
+          publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+          log: (level, event, fields) => log[level](event, fields),
+          onOgRender: (canonicalSlug, ip) => {
+            // Mirrors `momentOgRenders` — crawler bots rarely carry the cookie,
+            // so the IP fallback gives us a reasonable per-pair count.
+            stickyMetrics?.recordArcOgRender(canonicalSlug, ip);
+          },
+        })
+      : null;
+  if (arcRoutes) {
+    log.info('arc.ready', {
+      dir: ARC_OG_CACHE_DIR,
+      ogLruSize: ARC_OG_LRU_SIZE,
+      named: named.length,
+    });
+  }
+
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
       res.writeHead(400);
@@ -955,6 +1003,26 @@ async function main(): Promise<void> {
       const outcome = zoneRoutes.handleZonePage(req, res, rawName);
       if (outcome.status === 200 && stickyMetrics && visitorId && outcome.canonicalName) {
         stickyMetrics.recordZoneView(outcome.canonicalName, visitorId);
+      }
+      return;
+    }
+    // Arc OG image MUST come before the /arc/:slug HTML page since the
+    // image path shares the `/arc/` prefix.
+    if (arcRoutes && req.method === 'GET' && url.pathname.startsWith('/arc/')) {
+      const tail = url.pathname.slice('/arc/'.length);
+      if (tail.endsWith('/og.png')) {
+        const rawSlug = tail.slice(0, -'/og.png'.length);
+        await arcRoutes.handleArcOgImage(req, res, rawSlug);
+        return;
+      }
+      const rawSlug = tail.replace(/\/$/, '');
+      // Stamp the visitor cookie up-front so dedup keys land on first hit.
+      // Counter bump only on a 200 — rate-limited / 302 / 404 hits stay out
+      // of the per-pair dedup set, mirroring the /zone/:name flow.
+      const visitorId = stickyMetrics ? resolveVisitor(req, res) : null;
+      const outcome = arcRoutes.handleArcPage(req, res, rawSlug);
+      if (outcome.status === 200 && stickyMetrics && visitorId && outcome.canonicalSlug) {
+        stickyMetrics.recordArcView(outcome.canonicalSlug, visitorId);
       }
       return;
     }

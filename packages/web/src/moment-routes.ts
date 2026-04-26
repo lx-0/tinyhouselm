@@ -40,6 +40,8 @@ export interface ArcTag {
   label: ArcLabel;
   headline: string;
   glyph: string;
+  /** Canonical pair slug for the /arc/:slug deep link (TINA-813). */
+  slug?: string;
 }
 
 export interface NudgeTag {
@@ -178,6 +180,9 @@ export class MomentRoutes {
    * label for every named×named pair in the record, so a link shared days
    * ago surfaces today's labels alongside the co-presence headline. Skips
    * pairs with no recorded history (procedural × named, or first meeting).
+   *
+   * Each tag carries its canonical /arc/:slug so the moment page can deep
+   * link into the per-pair page (TINA-813).
    */
   private resolveGroupArcs(rec: MomentRecord): ArcTag[] {
     if (!this.relationships) return [];
@@ -195,6 +200,7 @@ export class MomentRoutes {
           label: state.arcLabel,
           headline: `${p1.name} & ${p2.name} — ${state.arcLabel}`,
           glyph: ARC_GLYPHS[state.arcLabel],
+          slug: arcPairSlug(p1, p2),
         });
       }
     }
@@ -327,6 +333,21 @@ function clientIp(req: IncomingMessage): string {
   return req.socket.remoteAddress ?? '';
 }
 
+/**
+ * Build the canonical pair slug for the /arc page from two named-participant
+ * snapshots. Mirrors the resolver in arc-routes.ts: canonical order is
+ * id-ascending, the slug uses each side's first-name lowercased.
+ */
+function arcPairSlug(a: { id: string; name: string }, b: { id: string; name: string }): string {
+  const [first, second] = a.id < b.id ? [a, b] : [b, a];
+  return `${arcFirstNameSlug(first.name)}-${arcFirstNameSlug(second.name)}`;
+}
+
+function arcFirstNameSlug(displayName: string): string {
+  const head = displayName.split(/\s+/, 1)[0] ?? displayName;
+  return head.toLowerCase();
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -396,8 +417,19 @@ function renderMomentHtml(
 
   const capturedAt = escapeHtml(rec.capturedAt);
   const closeReason = escapeHtml(rec.closeReason);
+  // Wrap the chip in a /arc/:slug link when both participants are named —
+  // gives the share-loop graph another edge into the pair-arc page (TINA-813).
+  const arcSlug =
+    arc && rec.participants.length === 2 && rec.participants[0]?.named && rec.participants[1]?.named
+      ? arcPairSlug(rec.participants[0]!, rec.participants[1]!)
+      : null;
+  const arcInner = arc
+    ? `<span class="glyph">${escapeHtml(arc.glyph)}</span><span>arc: ${escapeHtml(arc.headline)}</span>`
+    : '';
   const arcHtml = arc
-    ? `<div class="arc" data-arc="${escapeHtml(arc.label)}"><span class="glyph">${escapeHtml(arc.glyph)}</span><span>${escapeHtml(arc.headline)}</span></div>`
+    ? arcSlug
+      ? `<a class="arc" data-arc="${escapeHtml(arc.label)}" href="/arc/${escapeHtml(arcSlug)}">${arcInner}</a>`
+      : `<div class="arc" data-arc="${escapeHtml(arc.label)}">${arcInner}</div>`
     : '';
   const nudgeHtml = nudge
     ? `<div class="nudge" data-nudge="${escapeHtml(nudge.direction)}"><span class="glyph">${escapeHtml(nudge.glyph)}</span><span>${escapeHtml(nudge.label)}</span></div>`
@@ -407,10 +439,12 @@ function renderMomentHtml(
     : '';
   const groupArcsHtml = groupArcs.length
     ? `<div class="group-arcs">${groupArcs
-        .map(
-          (t) =>
-            `<span class="arc" data-arc="${escapeHtml(t.label)}"><span class="glyph">${escapeHtml(t.glyph)}</span><span>${escapeHtml(t.headline)}</span></span>`,
-        )
+        .map((t) => {
+          const inner = `<span class="glyph">${escapeHtml(t.glyph)}</span><span>${escapeHtml(t.headline)}</span>`;
+          return t.slug
+            ? `<a class="arc" data-arc="${escapeHtml(t.label)}" href="/arc/${escapeHtml(t.slug)}">${inner}</a>`
+            : `<span class="arc" data-arc="${escapeHtml(t.label)}">${inner}</span>`;
+        })
         .join('')}</div>`
     : '';
 
@@ -446,7 +480,8 @@ function renderMomentHtml(
     .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: rgba(255,255,255,0.05); font-size: 12px; }
     .chip .sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
     .chip .star { color: #f5c97a; margin-right: 2px; }
-    .arc { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font-size: 12px; letter-spacing: 0.04em; margin-bottom: 16px; background: rgba(185,176,220,0.12); color: #d6d0e6; text-transform: capitalize; }
+    .arc { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; font-size: 12px; letter-spacing: 0.04em; margin-bottom: 16px; background: rgba(185,176,220,0.12); color: #d6d0e6; text-transform: capitalize; text-decoration: none; }
+    a.arc:hover { text-decoration: underline; }
     .arc[data-arc="warming"] { background: rgba(140, 200, 150, 0.14); color: #c8e8cf; }
     .arc[data-arc="cooling"] { background: rgba(150, 180, 230, 0.14); color: #cddaf0; }
     .arc[data-arc="estranged"] { background: rgba(220, 140, 140, 0.14); color: #f0c7c7; }

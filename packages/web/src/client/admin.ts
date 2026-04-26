@@ -1065,6 +1065,8 @@ interface StickyDailyRollup {
   digestOgRenders?: number;
   /** Per-zone /zone/:name views, deduped per (zone, visitor) per day (TINA-744). */
   zoneViews?: number;
+  /** Per-pair /arc/:slug views, deduped per (slug, visitor) per day (TINA-813). */
+  arcViews?: number;
 }
 
 interface StickyMetricsPayload {
@@ -1093,7 +1095,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
   table.className = 'sticky-table';
   const thead = document.createElement('thead');
   thead.innerHTML =
-    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th><th>dig</th><th>zon</th></tr>';
+    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th><th>dig</th><th>zon</th><th>arc</th></tr>';
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const d of rows) {
@@ -1104,6 +1106,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
     const affordances = d.affordanceUses ?? 0;
     const digestViews = d.digestViews ?? 0;
     const zoneViews = d.zoneViews ?? 0;
+    const arcViews = d.arcViews ?? 0;
     const cells: Array<[string, boolean]> = [
       [d.date.slice(5), false],
       [String(d.sharesCreated), d.sharesCreated === 0],
@@ -1115,6 +1118,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
       [String(affordances), affordances === 0],
       [String(digestViews), digestViews === 0],
       [String(zoneViews), zoneViews === 0],
+      [String(arcViews), arcViews === 0],
     ];
     for (const [text, isZero] of cells) {
       const td = document.createElement('td');
@@ -1248,15 +1252,25 @@ function renderArcs(payload: ArcsPayload | null): void {
           td.textContent = '—';
         } else {
           td.dataset.arc = pair.arcLabel;
+          // The cell wraps an anchor that opens the per-pair arc page
+          // (TINA-813). Anchor lives inside the <td> so the existing arc
+          // colors/halo styles still apply to the cell background.
+          const link = document.createElement('a');
+          link.className = 'arc-cell-link';
+          const slug = arcPairSlug(row, col);
+          link.href = `/arc/${slug}`;
+          link.target = '_blank';
+          link.rel = 'noopener';
           const glyph = document.createElement('span');
           glyph.className = 'glyph';
           glyph.textContent = ARC_GLYPHS[pair.arcLabel];
           const aff = document.createElement('span');
           aff.className = 'aff';
           aff.textContent = formatAffinity(pair.affinity);
-          td.appendChild(glyph);
-          td.appendChild(aff);
-          td.title = `${row.name} ↔ ${col.name}\n${pair.arcLabel} · affinity ${pair.affinity.toFixed(2)} · ${pair.sharedConversationCount} conv${pair.sharedConversationCount === 1 ? '' : 's'}`;
+          link.appendChild(glyph);
+          link.appendChild(aff);
+          td.appendChild(link);
+          td.title = `${row.name} ↔ ${col.name}\n${pair.arcLabel} · affinity ${pair.affinity.toFixed(2)} · ${pair.sharedConversationCount} conv${pair.sharedConversationCount === 1 ? '' : 's'}\nclick → /arc/${slug}`;
         }
       }
       tr.appendChild(td);
@@ -1272,6 +1286,17 @@ function formatAffinity(a: number): string {
   if (Math.abs(a) < 0.01) return '0.00';
   const sign = a > 0 ? '+' : '';
   return `${sign}${a.toFixed(2)}`;
+}
+
+/**
+ * Build the canonical /arc/:slug pair URL component from two named characters.
+ * Mirrors arc-routes.ts: canonical order is id-ascending, slug parts are
+ * each side's first name lowercased.
+ */
+function arcPairSlug(a: { id: string; name: string }, b: { id: string; name: string }): string {
+  const [first, second] = a.id < b.id ? [a, b] : [b, a];
+  const head = (s: string) => (s.split(/\s+/, 1)[0] ?? s).toLowerCase();
+  return `${head(first.name)}-${head(second.name)}`;
 }
 
 async function fetchArcs(): Promise<void> {
