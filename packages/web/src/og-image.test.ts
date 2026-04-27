@@ -7,6 +7,7 @@ import {
   composeArcOg,
   composeCharacterOg,
   composeMomentOg,
+  composeMomentsIndexOg,
   composeZoneOg,
   encodePng,
   measureText,
@@ -391,5 +392,76 @@ describe('composeCharacterOg', () => {
       headline: 'a quiet morning',
     });
     expect(png.length).toBeGreaterThan(1000);
+  });
+});
+
+describe('composeMomentsIndexOg', () => {
+  const baseInput = {
+    participants: [
+      { name: 'Mei Tanaka', color: '#ffaaaa' },
+      { name: 'Hiro Abe', color: '#aaffff' },
+      { name: 'Ava Okafor', color: '#cccccc' },
+    ],
+    headline: 'Mei and Hiro caught up at the counter',
+    simDay: 12,
+    momentsCount: 47,
+  };
+
+  test('renders a 1200x630 PNG for a populated index', () => {
+    const png = composeMomentsIndexOg(baseInput);
+    expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    expect(png.readUInt32BE(16)).toBe(OG_WIDTH);
+    expect(png.readUInt32BE(20)).toBe(OG_HEIGHT);
+  });
+
+  test('is deterministic — same input produces the same bytes', () => {
+    const a = composeMomentsIndexOg(baseInput);
+    const b = composeMomentsIndexOg(baseInput);
+    expect(a.equals(b)).toBe(true);
+  });
+
+  test('different headlines produce different bytes', () => {
+    const a = composeMomentsIndexOg({ ...baseInput, headline: 'first headline' });
+    const b = composeMomentsIndexOg({ ...baseInput, headline: 'second totally different one' });
+    expect(a.equals(b)).toBe(false);
+  });
+
+  test('different sim-day produces different bytes (footer chip)', () => {
+    const a = composeMomentsIndexOg({ ...baseInput, simDay: 12 });
+    const b = composeMomentsIndexOg({ ...baseInput, simDay: 13 });
+    expect(a.equals(b)).toBe(false);
+  });
+
+  test('falls back gracefully on an empty index (no participants, no headline)', () => {
+    const png = composeMomentsIndexOg({
+      participants: [],
+      headline: '',
+      simDay: 0,
+      momentsCount: 0,
+    });
+    expect(png.length).toBeGreaterThan(1000);
+    // Distinct from the populated case so cache-key churn isolates the empty
+    // state.
+    const populated = composeMomentsIndexOg(baseInput);
+    expect(png.equals(populated)).toBe(false);
+  });
+
+  test('renders a "+N MORE" pill when totalParticipantCount exceeds 8', () => {
+    const eight = Array.from({ length: 8 }, (_, i) => ({
+      name: `P${i}`,
+      color: '#abcdef',
+    }));
+    const capped = composeMomentsIndexOg({
+      ...baseInput,
+      participants: eight,
+      totalParticipantCount: 8,
+    });
+    const overflow = composeMomentsIndexOg({
+      ...baseInput,
+      participants: eight,
+      totalParticipantCount: 12,
+    });
+    // The overflow pill changes the bytes — proves the layout actually drew it.
+    expect(capped.equals(overflow)).toBe(false);
   });
 });

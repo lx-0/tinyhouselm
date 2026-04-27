@@ -3,6 +3,8 @@ import { type MomentRecord, type SimTime, deriveWorldClock } from '@tina/shared'
 import { type ArcLabel, type NamedPersona, type RelationshipStore, simDay } from '@tina/sim';
 import { buildNamedResolver } from './character-routes.js';
 import type { MomentStore } from './moments.js';
+import { composeMomentsIndexOg } from './og-image.js';
+import type { OgCache } from './og-routes.js';
 
 export interface MomentsIndexRouteOptions {
   named: NamedPersona[];
@@ -17,6 +19,22 @@ export interface MomentsIndexRouteOptions {
   globalPerMin?: number;
   /** Records per page. Default 25 — see TINA-544 spec. */
   pageSize?: number;
+  /**
+   * Disk-backed OG image cache (TINA-1092). When provided, the route exposes
+   * `/moments/og.png` and references the rendered image from the index page's
+   * `og:image` meta. Pass `null`/omit to fall back to the meta-only behavior
+   * shipped with TINA-544.
+   */
+  ogCache?: OgCache | null;
+  /**
+   * Bumped after a 200 OG render — drives `momentsIndexOgRenders` sticky
+   * metric. Receives the requesting visitor-or-IP so the caller can dedup per
+   * (IP-or-visitor) per UTC day. The index has a single global cache key, so
+   * unlike `/character/:name/og.png` there is no per-resource id to scope on.
+   */
+  onOgRender?: (visitorOrIp: string) => void;
+  /** Logger — same shape as the rest of the route handlers. */
+  log?: (level: 'info' | 'warn' | 'error', event: string, fields?: Record<string, unknown>) => void;
   now?: () => number;
 }
 
@@ -75,6 +93,13 @@ interface RowData {
   isGroup: boolean;
 }
 
+/** Window of newest records the OG image considers when picking participants. */
+const INDEX_OG_WINDOW = 50;
+/** Cap on glyph-row participants drawn into the OG image. */
+const INDEX_OG_PARTICIPANT_CAP = 8;
+/** Cache key when the moments LRU is empty — keeps the cold-start card stable. */
+const INDEX_OG_EMPTY_KEY = 'empty';
+
 export class MomentsIndexRoutes {
   private readonly named: NamedPersona[];
   private readonly moments: MomentStore;
@@ -84,6 +109,13 @@ export class MomentsIndexRoutes {
   private readonly perIpRate: number;
   private readonly globalRate: number;
   private readonly pageSize: number;
+  private readonly ogCache: OgCache | null;
+  private readonly onOgRender?: (visitorOrIp: string) => void;
+  private readonly log: (
+    level: 'info' | 'warn' | 'error',
+    event: string,
+    fields?: Record<string, unknown>,
+  ) => void;
   private readonly now: () => number;
   private readonly byKey: Map<string, NamedPersona>;
   private readonly perIp = new Map<string, Bucket>();
@@ -98,8 +130,16 @@ export class MomentsIndexRoutes {
     this.perIpRate = opts.perIpPerMin ?? 60;
     this.globalRate = opts.globalPerMin ?? 600;
     this.pageSize = Math.max(1, opts.pageSize ?? 25);
+    this.ogCache = opts.ogCache ?? null;
+    this.onOgRender = opts.onOgRender;
+    this.log = opts.log ?? (() => {});
     this.now = opts.now ?? (() => Date.now());
     this.byKey = buildNamedResolver(this.named);
+  }
+
+  /** Whether the OG image route is wired (TINA-1092). */
+  hasOgImage(): boolean {
+    return this.ogCache !== null;
   }
 
   /**
@@ -135,6 +175,117 @@ export class MomentsIndexRoutes {
     const html = this.renderHtml(filters, page);
     writeHtml(res, 200, html);
     return { status: 200, filterKey: filters.filterKey, rateLimited: false };
+  }
+
+  /**
+   * GET /moments/og.png. Public. 200 PNG always (renders an empty fallback
+   * card when no moments have landed yet), 429 on rate-limit. Shares the
+   * per-IP / global limiter with `handleIndexPage` so a noisy crawler hammering
+   * both routes still gets bounded — same shape as `/character/:name/og.png`.
+   *
+   * Cache key encodes the freshest moment id so the image regenerates
+   * automatically whenever the index changes. The disk-LRU is small (default
+   * 32) since there is functionally one cache key at a time — older keys age
+   * out within an hour of normal sim activity.
+   */
+  async handleMomentsIndexOgImage(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.ogCache) {
+      writePlain(res, 404, 'not found');
+      return;
+    }
+    const ip = clientIp(req);
+    const rate = this.checkRate(ip);
+    if (!rate.ok) {
+      res.setHeader('retry-after', String(Math.ceil(rate.retryAfterMs / 1000)));
+      writePlain(res, 429, 'rate limited');
+      return;
+    }
+    const input = this.collectIndexOgInput();
+    const cacheKey = freshestCacheKey(input.freshestId);
+    let png: Buffer;
+    let cacheHit = false;
+    const t0 = this.now();
+    const cached = await this.ogCache.get(cacheKey);
+    if (cached) {
+      png = cached;
+      cacheHit = true;
+    } else {
+      png = composeMomentsIndexOg({
+        participants: input.participants,
+        headline: input.headline,
+        simDay: input.simDayValue,
+        momentsCount: input.momentsCount,
+        totalParticipantCount: input.totalNamedParticipantCount,
+      });
+      // Fire-and-forget — never block the response on the cache write. Same
+      // pattern as character/zone/arc OG routes.
+      void this.ogCache.set(cacheKey, png).catch((err) => {
+        this.log('warn', 'moments_index.og.cache.set.error', {
+          key: cacheKey,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+    res.writeHead(200, {
+      'content-type': 'image/png',
+      'content-length': String(png.length),
+      // Index OG drifts as new moments land — one-minute browser cache is
+      // enough to spare crawlers without freezing stale state. Mirrors
+      // /character/:name/og.png.
+      'cache-control': 'public, max-age=60',
+      'x-og-cache': cacheHit ? 'hit' : 'miss',
+    });
+    res.end(png);
+    this.log('info', 'moments_index.og.render', {
+      key: cacheKey,
+      cacheHit,
+      bytes: png.length,
+      ms: this.now() - t0,
+    });
+    this.onOgRender?.(ip);
+  }
+
+  /**
+   * Walk the freshest window of MomentRecords once, building the input the
+   * OG renderer needs. Newest-first dedup of named participants caps at 8;
+   * the freshest moment provides the headline, sim-day, and cache-key id.
+   */
+  private collectIndexOgInput(): {
+    participants: Array<{ name: string; color: string | null }>;
+    headline: string;
+    simDayValue: number;
+    momentsCount: number;
+    /** Distinct named participants in the freshest window — pre-cap. */
+    totalNamedParticipantCount: number;
+    /** Id of the freshest record, or null when the LRU is empty. */
+    freshestId: string | null;
+  } {
+    const all = this.moments.list();
+    const start = Math.max(0, all.length - INDEX_OG_WINDOW);
+    const window = all.slice(start);
+    const seen = new Map<string, { name: string; color: string | null }>();
+    // Walk newest → oldest so the freshest named faces win the cap. Stop only
+    // when we run out of records — the *count* of distinct named participants
+    // is reported separately so the renderer can decide whether to draw the
+    // overflow pill.
+    for (let i = window.length - 1; i >= 0; i--) {
+      const rec = window[i]!;
+      for (const p of rec.participants) {
+        if (!p.named) continue;
+        if (seen.has(p.id)) continue;
+        seen.set(p.id, { name: p.name, color: p.color });
+      }
+    }
+    const freshest = window[window.length - 1] ?? null;
+    const all8 = [...seen.values()].slice(0, INDEX_OG_PARTICIPANT_CAP);
+    return {
+      participants: all8,
+      headline: freshest?.headline ?? '',
+      simDayValue: freshest ? simDay(freshest.simTime) : 0,
+      momentsCount: this.moments.count(),
+      totalNamedParticipantCount: seen.size,
+      freshestId: freshest?.id ?? null,
+    };
   }
 
   private parseFilters(
@@ -249,6 +400,19 @@ export class MomentsIndexRoutes {
     const rowsHtml = this.renderRows(page.rows);
     const pager = this.renderPager(filters, page.nextCursor);
     const heading = filters.filterKey === '' ? 'All moments' : 'Filtered moments';
+    // TINA-1092: when the OG image cache is wired, point unfurlers at the
+    // generic `/moments/og.png` regardless of filter. The card is global —
+    // filtered views all read from the same image rather than minting a
+    // per-filter card (deferred to a follow-up if data justifies it).
+    const ogImageUrl = this.ogCache ? this.buildOgImageUrl() : null;
+    const ogImageMeta = ogImageUrl
+      ? `<meta property="og:image" content="${escapeHtml(ogImageUrl)}" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta name="twitter:image" content="${escapeHtml(ogImageUrl)}" />`
+      : '';
+    const twitterCard = ogImageUrl ? 'summary_large_image' : 'summary';
     return `<!doctype html>
 <html lang="en">
 <head>
@@ -260,7 +424,8 @@ export class MomentsIndexRoutes {
   <meta property="og:description" content="${escapeHtml(ogDescription)}" />
   <meta property="og:url" content="${escapeHtml(canonical)}" />
   <meta property="og:site_name" content="tinyhouse" />
-  <meta name="twitter:card" content="summary" />
+  ${ogImageMeta}
+  <meta name="twitter:card" content="${twitterCard}" />
   <meta name="twitter:title" content="${escapeHtml(ogTitle)}" />
   <meta name="twitter:description" content="${escapeHtml(ogDescription)}" />
   <link rel="canonical" href="${escapeHtml(canonical)}" />
@@ -390,6 +555,11 @@ export class MomentsIndexRoutes {
     if (nextCursor === null) return '';
     const url = this.buildCanonical({ ...filters, cursorBefore: nextCursor }, true);
     return `<div class="pager"><span></span><a href="${escapeHtml(url)}">older →</a></div>`;
+  }
+
+  private buildOgImageUrl(): string {
+    if (this.publicBaseUrl) return `${this.publicBaseUrl}/moments/og.png`;
+    return '/moments/og.png';
   }
 
   private buildCanonical(filters: ResolvedFilters, includeCursor: boolean): string {
@@ -538,6 +708,26 @@ function writeHtml(res: ServerResponse, status: number, body: string): void {
     'cache-control': 'public, max-age=60',
   });
   res.end(body);
+}
+
+function writePlain(res: ServerResponse, status: number, body: string): void {
+  res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
+  res.end(body);
+}
+
+/**
+ * Build a stable disk-LRU cache key for the freshest moment. Index OG cards
+ * regenerate whenever the freshest record changes — this is the contract the
+ * disk LRU relies on for invalidation. Falls back to a sentinel for the
+ * cold-start (no moments yet) case so even an empty sim caches its fallback.
+ */
+function freshestCacheKey(freshestId: string | null): string {
+  if (!freshestId) return INDEX_OG_EMPTY_KEY;
+  // OgCache enforces `^[A-Za-z0-9_-]{1,64}$`. Sanitize hard rather than
+  // trust the moment id format — bail to the empty key on garbage so a
+  // surprise pattern never tanks the route.
+  if (!/^[A-Za-z0-9_-]{1,60}$/.test(freshestId)) return INDEX_OG_EMPTY_KEY;
+  return `idx-${freshestId}`;
 }
 
 function escapeHtml(s: string): string {

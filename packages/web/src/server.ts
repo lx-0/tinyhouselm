@@ -143,6 +143,16 @@ const CHARACTER_OG_CACHE_DIR = isAbsolute(CHARACTER_OG_CACHE_DIR_ENV)
   : resolve(process.cwd(), CHARACTER_OG_CACHE_DIR_ENV);
 const CHARACTER_OG_LRU_SIZE = Number(process.env.CHARACTER_OG_LRU_SIZE ?? 64);
 
+// Moments-index OG image (TINA-1092). One global key at a time — keyed on
+// the freshest moment id — so the LRU is tiny. Older keys age out as new
+// moments land. Bumpable for unusually slow sims via env.
+const MOMENTS_INDEX_OG_CACHE_DIR_ENV =
+  process.env.MOMENTS_INDEX_OG_CACHE_DIR ?? './data/moments-index-og-cache';
+const MOMENTS_INDEX_OG_CACHE_DIR = isAbsolute(MOMENTS_INDEX_OG_CACHE_DIR_ENV)
+  ? MOMENTS_INDEX_OG_CACHE_DIR_ENV
+  : resolve(process.cwd(), MOMENTS_INDEX_OG_CACHE_DIR_ENV);
+const MOMENTS_INDEX_OG_LRU_SIZE = Number(process.env.MOMENTS_INDEX_OG_LRU_SIZE ?? 32);
+
 // Multi-character group co-presence moments (TINA-345).
 const GROUP_MOMENTS_ENABLED =
   (process.env.GROUP_MOMENTS_ENABLED ?? 'true').toLowerCase() !== 'false';
@@ -822,6 +832,15 @@ async function main(): Promise<void> {
   // Paginated moments index (TINA-544). Closes the share loop: a visitor who
   // landed on `/moment/:id` can now browse "more like this" by character /
   // zone / variant. Same rate-limit + visitor-stamp shape as `/character/:name`.
+  // Adds `/moments/og.png` (TINA-1092) when the OG cache is wired — one global
+  // card keyed on the freshest moment id, regenerated on index changes.
+  const momentsIndexOgCache = moments
+    ? new OgCache({
+        dir: MOMENTS_INDEX_OG_CACHE_DIR,
+        maxEntries: MOMENTS_INDEX_OG_LRU_SIZE,
+        log: (level, event, fields) => log[level](event, fields),
+      })
+    : null;
   const momentsIndexRoutes = moments
     ? new MomentsIndexRoutes({
         named,
@@ -829,8 +848,22 @@ async function main(): Promise<void> {
         relationships,
         simSpeed: clock.speed,
         publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+        ogCache: momentsIndexOgCache,
+        log: (level, event, fields) => log[level](event, fields),
+        onOgRender: (ip) => {
+          // Mirrors `momentOgRenders` — crawler bots rarely carry the cookie,
+          // so the IP fallback gives us a reasonable per-visitor count for
+          // the (single, global) moments-index card.
+          stickyMetrics?.recordMomentsIndexOgRender(ip);
+        },
       })
     : null;
+  if (momentsIndexRoutes?.hasOgImage()) {
+    log.info('moments_index.og.ready', {
+      dir: MOMENTS_INDEX_OG_CACHE_DIR,
+      ogLruSize: MOMENTS_INDEX_OG_LRU_SIZE,
+    });
+  }
 
   // Daily moment digest (TINA-684). Aggregates the day's top N moments at
   // request time from the live MomentRecord LRU + RelationshipStore — no
@@ -1040,6 +1073,16 @@ async function main(): Promise<void> {
       if (outcome.status === 200 && stickyMetrics && visitorId && outcome.canonicalDate) {
         stickyMetrics.recordDigestView(outcome.canonicalDate, visitorId);
       }
+      return;
+    }
+    // Moments-index OG image MUST come before the /moments HTML page since
+    // they share the `/moments` prefix (TINA-1092).
+    if (
+      momentsIndexRoutes?.hasOgImage() &&
+      req.method === 'GET' &&
+      url.pathname === '/moments/og.png'
+    ) {
+      await momentsIndexRoutes.handleMomentsIndexOgImage(req, res);
       return;
     }
     if (

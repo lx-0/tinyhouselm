@@ -1073,6 +1073,12 @@ interface StickyDailyRollup {
    */
   characterOgRenders?: number;
   /**
+   * `/moments/og.png` renders, deduped per (visitor-or-IP) per day (TINA-1092).
+   * Single global counter — the index has one cache key shared across
+   * filtered/unfiltered views.
+   */
+  momentsIndexOgRenders?: number;
+  /**
    * Related-moments rail clicks, deduped per (source-moment, visitor-or-IP)
    * per day (TINA-952). Counts hops *out of* a /moment/:id page via the
    * rail — the depth-loop signal the share funnel reads as a returner.
@@ -1134,7 +1140,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
   table.className = 'sticky-table';
   const thead = document.createElement('thead');
   thead.innerHTML =
-    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th><th>dig</th><th>zon</th><th>arc</th><th>cog</th><th>rail</th><th title="rail CTR per variant: freshest / arc_strength (TINA-1020)">rctr</th></tr>';
+    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th><th>dig</th><th>zon</th><th>arc</th><th>cog</th><th title="moments-index OG renders, deduped per visitor-or-IP per day (TINA-1092)">iog</th><th>rail</th><th title="rail CTR per variant: freshest / arc_strength (TINA-1020)">rctr</th></tr>';
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const d of rows) {
@@ -1147,6 +1153,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
     const zoneViews = d.zoneViews ?? 0;
     const arcViews = d.arcViews ?? 0;
     const characterOg = d.characterOgRenders ?? 0;
+    const momentsIndexOg = d.momentsIndexOgRenders ?? 0;
     const railClicks = d.momentRailClicks ?? 0;
     const railCtrText = formatRailCtr(d);
     const cells: Array<[string, boolean]> = [
@@ -1162,6 +1169,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
       [String(zoneViews), zoneViews === 0],
       [String(arcViews), arcViews === 0],
       [String(characterOg), characterOg === 0],
+      [String(momentsIndexOg), momentsIndexOg === 0],
       [String(railClicks), railClicks === 0],
       [railCtrText, railCtrText === '—'],
     ];
