@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { MomentParticipant, MomentRecord } from '@tina/shared';
 import { type ArcLabel, type NudgeDirection, type RelationshipStore, simDay } from '@tina/sim';
 import type { MomentStore } from './moments.js';
+import { type RailVariant, arcStrengthScore } from './rail-experiment.js';
 
 export interface MomentRouteOptions {
   store: MomentStore;
@@ -33,6 +34,21 @@ export interface MomentRouteOptions {
    * just hides the pill without rewriting records.
    */
   isSessionNudged?: ((sessionId: string) => NudgeDirection | null) | null;
+  /**
+   * Resolve the rail-ranking variant for the visitor making this request
+   * (TINA-1020). The server passes `visitor-or-IP` through `assignRailVariant`
+   * and hands the result here. When unset, falls back to `freshest` so unit
+   * tests and embedded callers behave like the pre-experiment baseline.
+   */
+  resolveRailVariant?: ((req: IncomingMessage) => RailVariant) | null;
+  /**
+   * Fired when the related-moments rail actually renders (≥2 candidates) on a
+   * `/moment/:id` page (TINA-1020). The server uses this to bump the
+   * `momentRailImpressions` counter so the variant CTR is computable.
+   */
+  onRailRendered?:
+    | ((sourceMomentId: string, variant: RailVariant, req: IncomingMessage) => void)
+    | null;
   now?: () => number;
 }
 
@@ -87,6 +103,10 @@ export class MomentRoutes {
   private readonly globalRate: number;
   private readonly relationships: RelationshipStore | null;
   private readonly isSessionNudged: ((sessionId: string) => NudgeDirection | null) | null;
+  private readonly resolveRailVariant: ((req: IncomingMessage) => RailVariant) | null;
+  private readonly onRailRendered:
+    | ((sourceMomentId: string, variant: RailVariant, req: IncomingMessage) => void)
+    | null;
   private readonly now: () => number;
   private readonly perIp = new Map<string, Bucket>();
   private readonly globalBucket: Bucket = { count: 0, windowStart: 0 };
@@ -100,14 +120,25 @@ export class MomentRoutes {
     this.globalRate = opts.globalSharePerMin ?? 120;
     this.relationships = opts.relationships ?? null;
     this.isSessionNudged = opts.isSessionNudged ?? null;
+    this.resolveRailVariant = opts.resolveRailVariant ?? null;
+    this.onRailRendered = opts.onRailRendered ?? null;
     this.now = opts.now ?? (() => Date.now());
   }
 
   /**
    * GET /moment/:id — render a read-only HTML page with OG meta tags. Public,
    * no auth. 404 when the id is unknown.
+   *
+   * The request object is optional so unit tests can call this without
+   * standing up a full IncomingMessage. When present, it's used to resolve
+   * the rail-ranking variant (TINA-1020) and to fire the impression callback.
    */
-  handleMomentPage(res: ServerResponse, id: string, canonicalPath?: string): void {
+  handleMomentPage(
+    res: ServerResponse,
+    id: string,
+    canonicalPath?: string,
+    req?: IncomingMessage,
+  ): void {
     if (!ID_PATTERN.test(id)) {
       writeHtml(res, 404, notFoundPage());
       return;
@@ -120,7 +151,12 @@ export class MomentRoutes {
     const arc = this.resolveArc(rec);
     const nudge = this.resolveNudge(rec);
     const groupArcs = this.resolveGroupArcs(rec);
-    const related = buildRelatedMoments(rec, this.store.list(), 6);
+    const variant: RailVariant =
+      req && this.resolveRailVariant ? this.resolveRailVariant(req) : 'freshest';
+    const related = buildRelatedMoments(rec, this.store.list(), 6, variant, this.relationships);
+    if (req && this.onRailRendered && related.length >= 2) {
+      this.onRailRendered(rec.id, variant, req);
+    }
     const html = renderMomentHtml(
       rec,
       this.buildCanonicalUrl(canonicalPath ?? `/moment/${id}`),
@@ -129,6 +165,7 @@ export class MomentRoutes {
       nudge,
       groupArcs,
       related,
+      variant,
     );
     writeHtml(res, 200, html);
   }
@@ -384,14 +421,26 @@ export function buildMomentDescription(rec: MomentRecord, max = 160): string {
  *   2. Shares ≥1 named participant.
  *   3. Same zone.
  *   4. Adjacent sim-day (±1).
- * Tiebreak inside a tier: freshest first, then id ascending. The source moment
- * itself is always skipped. Returns up to `max` candidates from the
- * concatenated tiers; an empty result means the rail should be omitted.
+ *
+ * Tiers are unchanged across variants — only the inner-tier sort comparator
+ * differs (TINA-1020):
+ *   - `freshest` (control): simTime desc → id asc.
+ *   - `arc_strength`: arcStrengthScore desc → simTime desc → id asc, where
+ *     arcStrengthScore is the sum of pairwise affinity from the live
+ *     `RelationshipStore` between source named-participants and candidate
+ *     named-participants. When relationships is null the score is always 0,
+ *     which collapses to the `freshest` ordering.
+ *
+ * The source moment itself is always skipped. Returns up to `max` candidates
+ * from the concatenated tiers; an empty result means the rail should be
+ * omitted.
  */
 export function buildRelatedMoments(
   source: MomentRecord,
   all: MomentRecord[],
   max: number,
+  variant: RailVariant = 'freshest',
+  relationships: RelationshipStore | null = null,
 ): MomentRecord[] {
   if (max <= 0) return [];
   const sourceNamed = new Set(source.participants.filter((p) => p.named).map((p) => p.id));
@@ -420,7 +469,18 @@ export function buildRelatedMoments(
       tiers[3]!.push(cand);
     }
   }
+  const scores =
+    variant === 'arc_strength'
+      ? new Map<string, number>(
+          tiers.flat().map((m) => [m.id, arcStrengthScore(source, m, relationships)]),
+        )
+      : null;
   const cmp = (a: MomentRecord, b: MomentRecord): number => {
+    if (scores) {
+      const sa = scores.get(a.id) ?? 0;
+      const sb = scores.get(b.id) ?? 0;
+      if (sb !== sa) return sb - sa;
+    }
     if (b.simTime !== a.simTime) return b.simTime - a.simTime;
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   };
@@ -443,6 +503,7 @@ function renderMomentHtml(
   nudge: NudgeTag | null,
   groupArcs: ArcTag[] = [],
   related: MomentRecord[] = [],
+  railVariant: RailVariant = 'freshest',
 ): string {
   const title = escapeHtml(rec.headline);
   const description = escapeHtml(buildMomentDescription(rec));
@@ -514,7 +575,7 @@ function renderMomentHtml(
   const relatedHtml =
     related.length >= 2
       ? `<section class="related"><h3>Related moments</h3><div class="related-rail">${related
-          .map((m) => renderRelatedCard(m, rec.id))
+          .map((m) => renderRelatedCard(m, rec.id, railVariant))
           .join('')}</div></section>`
       : '';
 
@@ -618,9 +679,10 @@ function renderMomentHtml(
  * row (gold halo for named), the deterministic headline truncated by CSS to a
  * single line, a sim-day badge, and a `group · N` badge for group-variant
  * moments. The link includes `?from=<sourceId>` so server-side accounting can
- * dedupe rail-driven clicks per (source moment, IP, day).
+ * dedupe rail-driven clicks per (source moment, IP, day), and `&v=<variant>`
+ * so the click is attributed to the variant the rendering page used (TINA-1020).
  */
-function renderRelatedCard(m: MomentRecord, sourceId: string): string {
+function renderRelatedCard(m: MomentRecord, sourceId: string, variant: RailVariant): string {
   const glyphs = m.participants
     .slice(0, 6)
     .map((p) => participantSwatch(p))
@@ -630,7 +692,7 @@ function renderRelatedCard(m: MomentRecord, sourceId: string): string {
   const groupBadge = isGroup
     ? `<span class="rc-badge group">group · ${m.participants.length}</span>`
     : '';
-  return `<a class="related-card" href="/moment/${escapeHtml(m.id)}?from=${escapeHtml(sourceId)}"><div class="rc-glyphs">${glyphs}</div><div class="rc-headline">${escapeHtml(m.headline)}</div><div class="rc-meta"><span class="rc-badge">sd-${day}</span>${groupBadge}</div></a>`;
+  return `<a class="related-card" href="/moment/${escapeHtml(m.id)}?from=${escapeHtml(sourceId)}&amp;v=${escapeHtml(variant)}"><div class="rc-glyphs">${glyphs}</div><div class="rc-headline">${escapeHtml(m.headline)}</div><div class="rc-meta"><span class="rc-badge">sd-${day}</span>${groupBadge}</div></a>`;
 }
 
 function participantSwatch(p: MomentParticipant): string {

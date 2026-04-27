@@ -1078,6 +1078,17 @@ interface StickyDailyRollup {
    * rail — the depth-loop signal the share funnel reads as a returner.
    */
   momentRailClicks?: number;
+  /**
+   * Per-variant rail clicks (TINA-1020). Drives the per-variant CTR readout
+   * alongside `momentRailImpressionsByVariant`.
+   */
+  momentRailClicksByVariant?: { freshest?: number; arc_strength?: number };
+  /**
+   * Total rail impressions (TINA-1020). Bumped at render time when the rail
+   * actually renders (≥2 candidates), deduped per (source, variant, visitor).
+   */
+  momentRailImpressions?: number;
+  momentRailImpressionsByVariant?: { freshest?: number; arc_strength?: number };
 }
 
 interface StickyMetricsPayload {
@@ -1087,6 +1098,23 @@ interface StickyMetricsPayload {
 }
 
 const stickyBodyEl = document.getElementById('sticky-metrics-body') as HTMLElement;
+
+/**
+ * Per-variant rail CTR cell content (TINA-1020). Format: `<freshest>/<arc>`
+ * as integer percentages. Each side reads `—` when that variant had no
+ * impressions (no clicks possible). When neither variant had impressions,
+ * the cell shows a single `—` and the column renders as zero.
+ */
+function formatRailCtr(d: StickyDailyRollup): string {
+  const clicks = d.momentRailClicksByVariant ?? {};
+  const impressions = d.momentRailImpressionsByVariant ?? {};
+  const fImp = impressions.freshest ?? 0;
+  const aImp = impressions.arc_strength ?? 0;
+  if (fImp === 0 && aImp === 0) return '—';
+  const fmt = (clicks: number, imps: number): string =>
+    imps === 0 ? '—' : `${Math.round((clicks / imps) * 100)}`;
+  return `${fmt(clicks.freshest ?? 0, fImp)}/${fmt(clicks.arc_strength ?? 0, aImp)}`;
+}
 
 function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
   if (!payload || !payload.ok) {
@@ -1106,7 +1134,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
   table.className = 'sticky-table';
   const thead = document.createElement('thead');
   thead.innerHTML =
-    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th><th>dig</th><th>zon</th><th>arc</th><th>cog</th><th>rail</th></tr>';
+    '<tr><th>date</th><th>shares</th><th>uniq</th><th>24h</th><th>7d</th><th>nudge</th><th>grp</th><th>aff</th><th>dig</th><th>zon</th><th>arc</th><th>cog</th><th>rail</th><th title="rail CTR per variant: freshest / arc_strength (TINA-1020)">rctr</th></tr>';
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const d of rows) {
@@ -1120,6 +1148,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
     const arcViews = d.arcViews ?? 0;
     const characterOg = d.characterOgRenders ?? 0;
     const railClicks = d.momentRailClicks ?? 0;
+    const railCtrText = formatRailCtr(d);
     const cells: Array<[string, boolean]> = [
       [d.date.slice(5), false],
       [String(d.sharesCreated), d.sharesCreated === 0],
@@ -1134,6 +1163,7 @@ function renderStickyMetrics(payload: StickyMetricsPayload | null): void {
       [String(arcViews), arcViews === 0],
       [String(characterOg), characterOg === 0],
       [String(railClicks), railClicks === 0],
+      [railCtrText, railCtrText === '—'],
     ];
     for (const [text, isZero] of cells) {
       const td = document.createElement('td');

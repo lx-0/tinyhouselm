@@ -32,6 +32,7 @@ import { MomentsIndexRoutes } from './moments-index-routes.js';
 import { MomentStore } from './moments.js';
 import { ObservabilityStore } from './observability.js';
 import { OgCache, OgRoutes } from './og-routes.js';
+import { type RailVariant, assignRailVariant, isRailVariant } from './rail-experiment.js';
 import { mergeReflectionOptions, resolveReflectionTunables } from './reflection-config.js';
 import {
   type SnapshotScheduler,
@@ -150,6 +151,12 @@ const GROUP_MOMENTS_MIN_CONSECUTIVE_TICKS = Number(
   process.env.GROUP_MOMENTS_MIN_CONSECUTIVE_TICKS ?? 3,
 );
 const GROUP_MOMENTS_DEDUP_MAX = Number(process.env.GROUP_MOMENTS_DEDUP_MAX ?? 512);
+
+// Rail-ranking experiment (TINA-1020). Default on; set to "off" to force the
+// `freshest` variant for every visitor and revert to the pre-experiment
+// behavior without redeploying.
+const RAIL_RANK_EXPERIMENT_ENABLED =
+  (process.env.RAIL_RANK_EXPERIMENT ?? 'on').toLowerCase() !== 'off';
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
@@ -719,6 +726,20 @@ async function main(): Promise<void> {
         checkAdmin: (req) => checkAdmin(req, adminToken),
         relationships,
         isSessionNudged,
+        // Rail-ranking variant resolution (TINA-1020). Visitor cookie wins;
+        // raw IP fallback keeps the assignment stable for cookie-less first
+        // hits and crawlers. The env knob short-circuits everyone to
+        // `freshest` so we can revert without redeploying.
+        resolveRailVariant: (req) => {
+          const visitorOrIp = parseVisitorCookie(req.headers.cookie) || requestIp(req);
+          return assignRailVariant(visitorOrIp, RAIL_RANK_EXPERIMENT_ENABLED);
+        },
+        onRailRendered: (sourceMomentId, variant, req) => {
+          if (!stickyMetrics) return;
+          const visitorOrIp = parseVisitorCookie(req.headers.cookie) || requestIp(req);
+          if (!visitorOrIp) return;
+          stickyMetrics.recordMomentRailImpression(sourceMomentId, variant, visitorOrIp);
+        },
         onShare: () => {
           budget.record(0, 'admin:moment:share');
           log.info('admin.moment.share', {});
@@ -971,17 +992,25 @@ async function main(): Promise<void> {
         if (stickyMetrics) {
           const visitorId = resolveVisitor(req, res);
           stickyMetrics.recordMomentVisit(visitorId);
-          // Related-moments rail click telemetry (TINA-952). The rail link
-          // appends `?from=<sourceMomentId>`; we bump the per-source counter
-          // here so the dedup runs before the page render. Self-referential
-          // `from` (somehow visiting your own page from your own rail) and
-          // ill-formed ids are ignored — the counter only counts real hops.
+          // Related-moments rail click telemetry (TINA-952 + TINA-1020).
+          // The rail link appends `?from=<sourceMomentId>&v=<variant>`; we
+          // bump the per-(source, variant) counter here so the dedup runs
+          // before the page render. Self-referential `from` (somehow visiting
+          // your own page from your own rail) and ill-formed ids are ignored.
+          // The variant comes from the URL when present and valid; we fall
+          // back to recomputing from the visitor cookie/IP so cookie-stamp
+          // races don't drop the click. When the experiment is off, the
+          // fallback always returns `freshest`.
           const fromId = url.searchParams.get('from');
           if (fromId && fromId !== id && /^[A-Za-z0-9_-]{1,64}$/.test(fromId)) {
-            stickyMetrics.recordMomentRailClick(fromId, visitorId || requestIp(req));
+            const rawVariant = url.searchParams.get('v');
+            const variant: RailVariant = isRailVariant(rawVariant)
+              ? rawVariant
+              : assignRailVariant(visitorId || requestIp(req), RAIL_RANK_EXPERIMENT_ENABLED);
+            stickyMetrics.recordMomentRailClick(fromId, variant, visitorId || requestIp(req));
           }
         }
-        momentRoutes.handleMomentPage(res, id, url.pathname);
+        momentRoutes.handleMomentPage(res, id, url.pathname, req);
         return;
       }
       if (req.method === 'GET' && url.pathname.startsWith('/api/moments/')) {

@@ -812,12 +812,12 @@ describe('MomentRoutes.handleMomentPage rail rendering (TINA-952)', () => {
     expect(res.body).toContain('class="related"');
     expect(res.body).toContain('Related moments');
     expect(res.body).toContain('class="related-card"');
-    // The rail card link must include ?from=<sourceId> so server-side
-    // accounting can dedupe per (source, IP, day).
-    expect(res.body).toContain('href="/moment/r2?from=r1"');
-    expect(res.body).toContain('href="/moment/r3?from=r1"');
+    // The rail card link must include ?from=<sourceId>&v=<variant> so server
+    // accounting can dedupe per (source, variant, IP, day) — TINA-952 + TINA-1020.
+    expect(res.body).toContain('href="/moment/r2?from=r1&amp;v=freshest"');
+    expect(res.body).toContain('href="/moment/r3?from=r1&amp;v=freshest"');
     // Source itself must NOT appear in the rail.
-    expect(res.body).not.toContain('href="/moment/r1?from=r1"');
+    expect(res.body).not.toContain('href="/moment/r1?from=r1');
   });
 
   test('rail card carries a sd-N badge and a group · N badge for group variants', () => {

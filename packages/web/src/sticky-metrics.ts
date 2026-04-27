@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { type RailVariant, isRailVariant } from './rail-experiment.js';
 
 export const STICKY_METRICS_FILE = 'sticky-metrics.json';
 export const STICKY_METRICS_TMP_SUFFIX = '.tmp';
@@ -171,16 +172,27 @@ interface DayState {
   /** Floor counter once a per-character dedup set hits its cap. */
   characterOgExtraRenders: number;
   /**
-   * Per-source-moment-id dedup sets for related-moments rail clicks on
-   * `/moment/:id` (TINA-952). Keyed on the *source* moment id (the page the
-   * rail rendered on, passed back as `?from=`); each set holds visitor ids
-   * (or raw IPs for clients that don't carry the cookie) that already counted
-   * toward `momentRailClicks` this day. Past the per-id cap the dedup set
-   * stops growing and the floor counter climbs.
+   * Per-(variant, source-moment-id) dedup sets for related-moments rail clicks
+   * on `/moment/:id` (TINA-952 + TINA-1020). The map key is
+   * `${variant}::${sourceMomentId}`. Each set holds visitor ids (or raw IPs
+   * for clients that don't carry the cookie) that already counted toward
+   * `momentRailClicks` this day for that variant. Past the per-key cap the
+   * dedup set stops growing and the per-variant floor counter climbs.
+   *
+   * Legacy keys without the `::` prefix (written before TINA-1020) are
+   * preserved as-is and treated as the `freshest` variant by the rollup.
    */
   momentRailClickVisitors: Map<string, Set<string>>;
-  /** Floor counter once a per-source dedup set hits its cap. */
-  momentRailClickExtra: number;
+  /** Per-variant floor counter once a per-key dedup set hits its cap. */
+  momentRailClickExtraByVariant: Record<RailVariant, number>;
+  /**
+   * Per-(variant, source-moment-id) dedup sets for related-moments rail
+   * impressions (TINA-1020). Bumped at `/moment/:id` render time when the
+   * rail actually renders (≥2 candidates). Same shape as the click map.
+   */
+  momentRailImpressionVisitors: Map<string, Set<string>>;
+  /** Per-variant floor counter once a per-key dedup set hits its cap. */
+  momentRailImpressionExtraByVariant: Record<RailVariant, number>;
 }
 
 interface VisitorState {
@@ -233,9 +245,19 @@ interface PersistedDay {
   /** Absent on payloads written before TINA-882; loaded as empty + 0. */
   characterOgVisitors?: Array<{ id: string; visitors: string[] }>;
   characterOgExtraRenders?: number;
-  /** Absent on payloads written before TINA-952; loaded as empty + 0. */
+  /**
+   * Absent on payloads written before TINA-952; loaded as empty + 0.
+   * Pre-TINA-1020 entries used un-prefixed `id` (just the source moment id).
+   * From TINA-1020 onward, `id` is `${variant}::${sourceMomentId}`.
+   */
   momentRailClickVisitors?: Array<{ id: string; visitors: string[] }>;
+  /** Pre-TINA-1020: a single number. From TINA-1020 onward, prefer `momentRailClickExtraByVariant`. */
   momentRailClickExtra?: number;
+  /** Per-variant floor counters introduced in TINA-1020. */
+  momentRailClickExtraByVariant?: Partial<Record<RailVariant, number>>;
+  /** Absent on payloads written before TINA-1020; loaded as empty + 0. */
+  momentRailImpressionVisitors?: Array<{ id: string; visitors: string[] }>;
+  momentRailImpressionExtraByVariant?: Partial<Record<RailVariant, number>>;
 }
 
 interface PersistedVisitor {
@@ -323,9 +345,25 @@ export interface DailyRollup {
    * per (source-moment, IP-or-visitor). The counter measures how many
    * distinct rail-driven hops happen per source page — the depth-loop signal
    * the share funnel reads as a 24h returner via TINA-145. Same dedup shape
-   * as `momentOgRenders`.
+   * as `momentOgRenders`. Sum of all variants for back-compat with the
+   * pre-TINA-1020 readout.
    */
   momentRailClicks: number;
+  /**
+   * Related-moments rail clicks split by variant (TINA-1020). Together with
+   * `momentRailImpressionsByVariant` these drive the per-variant CTR readout
+   * in /admin so the CEO can eyeball whether `arc_strength` beats `freshest`.
+   */
+  momentRailClicksByVariant: Record<RailVariant, number>;
+  /**
+   * Related-moments rail impressions on `/moment/:id` this day (TINA-1020),
+   * deduped per (source-moment, variant, IP-or-visitor). Bumped at render
+   * time only when the rail actually renders (≥2 candidates). Sum across
+   * variants.
+   */
+  momentRailImpressions: number;
+  /** Per-variant impressions split (TINA-1020). */
+  momentRailImpressionsByVariant: Record<RailVariant, number>;
 }
 
 async function defaultReader(path: string): Promise<string | null> {
@@ -357,6 +395,18 @@ export function dayKeyUtc(ms: number): string {
   const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(d.getUTCDate()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
+ * Pull the variant out of a `${variant}::${sourceMomentId}` rail dedup key.
+ * Pre-TINA-1020 keys had no `::` separator; treat them as `freshest` so the
+ * legacy data lands in the right rollup bucket.
+ */
+function parseRailKeyVariant(key: string): RailVariant {
+  const sep = key.indexOf('::');
+  if (sep === -1) return 'freshest';
+  const v = key.slice(0, sep);
+  return isRailVariant(v) ? v : 'freshest';
 }
 
 function addDaysUtc(dayKey: string, deltaDays: number): string {
@@ -520,6 +570,24 @@ export class StickyMetrics {
           momentRailClickVisitors.set(row.id, set);
         }
       }
+      const momentRailImpressionVisitors = new Map<string, Set<string>>();
+      if (Array.isArray(d.momentRailImpressionVisitors)) {
+        for (const row of d.momentRailImpressionVisitors) {
+          if (!row || typeof row.id !== 'string') continue;
+          const set = new Set<string>(Array.isArray(row.visitors) ? row.visitors : []);
+          momentRailImpressionVisitors.set(row.id, set);
+        }
+      }
+      // Migrate the pre-TINA-1020 single-number floor into the freshest bucket.
+      const legacyClickExtra = Number(d.momentRailClickExtra) || 0;
+      const clickExtraByVariant: Record<RailVariant, number> = {
+        freshest: Number(d.momentRailClickExtraByVariant?.freshest ?? legacyClickExtra) || 0,
+        arc_strength: Number(d.momentRailClickExtraByVariant?.arc_strength ?? 0) || 0,
+      };
+      const impressionExtraByVariant: Record<RailVariant, number> = {
+        freshest: Number(d.momentRailImpressionExtraByVariant?.freshest ?? 0) || 0,
+        arc_strength: Number(d.momentRailImpressionExtraByVariant?.arc_strength ?? 0) || 0,
+      };
       this.days.set(d.date, {
         date: d.date,
         shares: Number(d.shares) || 0,
@@ -551,7 +619,9 @@ export class StickyMetrics {
         characterOgVisitors,
         characterOgExtraRenders: Number(d.characterOgExtraRenders) || 0,
         momentRailClickVisitors,
-        momentRailClickExtra: Number(d.momentRailClickExtra) || 0,
+        momentRailClickExtraByVariant: clickExtraByVariant,
+        momentRailImpressionVisitors,
+        momentRailImpressionExtraByVariant: impressionExtraByVariant,
       });
     }
     for (const v of shape.visitors ?? []) {
@@ -766,26 +836,57 @@ export class StickyMetrics {
   }
 
   /**
-   * Record a click on the related-moments rail (TINA-952). Deduped per
-   * (source-moment, visitor-or-IP) per UTC day. Pass the *source* moment id
-   * (the page where the rail rendered, carried back to the server in the
-   * `?from=` query param), never the destination — the counter measures rail
-   * conversion *out of* a page, not into one. Past the per-source cap the
-   * dedup set stops growing and the floor counter climbs.
+   * Record a click on the related-moments rail (TINA-952 + TINA-1020). Deduped
+   * per (source-moment, variant, visitor-or-IP) per UTC day. Pass the *source*
+   * moment id (the page where the rail rendered, carried back to the server in
+   * the `?from=` query param), never the destination — the counter measures
+   * rail conversion *out of* a page, not into one. The variant comes from the
+   * `?v=` query param the rail card encoded at render time. Past the per-key
+   * cap the dedup set stops growing and the per-variant floor counter climbs.
    */
-  recordMomentRailClick(sourceMomentId: string, visitorOrIp: string): void {
+  recordMomentRailClick(sourceMomentId: string, variant: RailVariant, visitorOrIp: string): void {
     if (!sourceMomentId || !visitorOrIp) return;
     const day = this.day(dayKeyUtc(this.now()));
-    let set = day.momentRailClickVisitors.get(sourceMomentId);
+    const key = `${variant}::${sourceMomentId}`;
+    let set = day.momentRailClickVisitors.get(key);
     if (!set) {
       set = new Set<string>();
-      day.momentRailClickVisitors.set(sourceMomentId, set);
+      day.momentRailClickVisitors.set(key, set);
     }
     if (set.has(visitorOrIp)) return;
     if (set.size < this.maxMomentVisitorsPerDay) {
       set.add(visitorOrIp);
     } else {
-      day.momentRailClickExtra += 1;
+      day.momentRailClickExtraByVariant[variant] += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
+   * Record an impression of the related-moments rail (TINA-1020). Bumped at
+   * `/moment/:id` render time only when the rail actually renders (≥2
+   * candidates). Deduped per (source-moment, variant, visitor-or-IP) per UTC
+   * day. Together with `recordMomentRailClick` this gives a per-variant CTR
+   * the CEO eyeballs in /admin.
+   */
+  recordMomentRailImpression(
+    sourceMomentId: string,
+    variant: RailVariant,
+    visitorOrIp: string,
+  ): void {
+    if (!sourceMomentId || !visitorOrIp) return;
+    const day = this.day(dayKeyUtc(this.now()));
+    const key = `${variant}::${sourceMomentId}`;
+    let set = day.momentRailImpressionVisitors.get(key);
+    if (!set) {
+      set = new Set<string>();
+      day.momentRailImpressionVisitors.set(key, set);
+    }
+    if (set.has(visitorOrIp)) return;
+    if (set.size < this.maxMomentVisitorsPerDay) {
+      set.add(visitorOrIp);
+    } else {
+      day.momentRailImpressionExtraByVariant[variant] += 1;
     }
     this.scheduleFlush();
   }
@@ -960,10 +1061,25 @@ export class StickyMetrics {
       if (d) {
         for (const set of d.characterOgVisitors.values()) characterOgRenders += set.size;
       }
-      let momentRailClicks = d?.momentRailClickExtra ?? 0;
+      const clicksByVariant: Record<RailVariant, number> = {
+        freshest: d?.momentRailClickExtraByVariant.freshest ?? 0,
+        arc_strength: d?.momentRailClickExtraByVariant.arc_strength ?? 0,
+      };
+      const impressionsByVariant: Record<RailVariant, number> = {
+        freshest: d?.momentRailImpressionExtraByVariant.freshest ?? 0,
+        arc_strength: d?.momentRailImpressionExtraByVariant.arc_strength ?? 0,
+      };
       if (d) {
-        for (const set of d.momentRailClickVisitors.values()) momentRailClicks += set.size;
+        for (const [key, set] of d.momentRailClickVisitors.entries()) {
+          clicksByVariant[parseRailKeyVariant(key)] += set.size;
+        }
+        for (const [key, set] of d.momentRailImpressionVisitors.entries()) {
+          impressionsByVariant[parseRailKeyVariant(key)] += set.size;
+        }
       }
+      const momentRailClicks = clicksByVariant.freshest + clicksByVariant.arc_strength;
+      const momentRailImpressions =
+        impressionsByVariant.freshest + impressionsByVariant.arc_strength;
       out.push({
         date,
         sharesCreated: d?.shares ?? 0,
@@ -984,6 +1100,9 @@ export class StickyMetrics {
         arcOgRenders,
         characterOgRenders,
         momentRailClicks,
+        momentRailClicksByVariant: clicksByVariant,
+        momentRailImpressions,
+        momentRailImpressionsByVariant: impressionsByVariant,
       });
     }
     return out;
@@ -1041,7 +1160,9 @@ export class StickyMetrics {
         characterOgVisitors: new Map(),
         characterOgExtraRenders: 0,
         momentRailClickVisitors: new Map(),
-        momentRailClickExtra: 0,
+        momentRailClickExtraByVariant: { freshest: 0, arc_strength: 0 },
+        momentRailImpressionVisitors: new Map(),
+        momentRailImpressionExtraByVariant: { freshest: 0, arc_strength: 0 },
       };
       this.days.set(date, d);
       this.pruneOld(date);
@@ -1184,7 +1305,11 @@ export class StickyMetrics {
           id,
           visitors: [...set],
         })),
-        momentRailClickExtra: d.momentRailClickExtra,
+        momentRailClickExtraByVariant: { ...d.momentRailClickExtraByVariant },
+        momentRailImpressionVisitors: [...d.momentRailImpressionVisitors.entries()].map(
+          ([id, set]) => ({ id, visitors: [...set] }),
+        ),
+        momentRailImpressionExtraByVariant: { ...d.momentRailImpressionExtraByVariant },
       })),
       visitors: [...this.visitors.entries()].map(([id, v]) => ({
         id,

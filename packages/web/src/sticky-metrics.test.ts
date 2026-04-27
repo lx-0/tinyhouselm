@@ -55,6 +55,9 @@ describe('StickyMetrics.recordShare', () => {
       arcOgRenders: 0,
       characterOgRenders: 0,
       momentRailClicks: 0,
+      momentRailClicksByVariant: { freshest: 0, arc_strength: 0 },
+      momentRailImpressions: 0,
+      momentRailImpressionsByVariant: { freshest: 0, arc_strength: 0 },
     });
     expect(r[0]!.date).toBe('2026-04-17');
   });
@@ -814,52 +817,128 @@ describe('StickyMetrics.recordCharacterOgRender (TINA-882)', () => {
   });
 });
 
-describe('StickyMetrics.recordMomentRailClick (TINA-952)', () => {
-  test('dedupes per (source moment, visitor) per day', () => {
+describe('StickyMetrics.recordMomentRailClick (TINA-952 + TINA-1020)', () => {
+  test('dedupes per (source moment, variant, visitor) per day', () => {
     const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
-    // Two visitors clicking the rail on source m1.
-    m.recordMomentRailClick('m1', 'alice');
-    m.recordMomentRailClick('m1', 'bob');
+    // Two visitors clicking the rail on source m1 under freshest.
+    m.recordMomentRailClick('m1', 'freshest', 'alice');
+    m.recordMomentRailClick('m1', 'freshest', 'bob');
     // Repeat from alice → deduped.
-    m.recordMomentRailClick('m1', 'alice');
+    m.recordMomentRailClick('m1', 'freshest', 'alice');
     // Same alice clicking the rail on a *different* source page → counts.
-    m.recordMomentRailClick('m2', 'alice');
-    expect(m.rollup(7).at(-1)!.momentRailClicks).toBe(3);
+    m.recordMomentRailClick('m2', 'freshest', 'alice');
+    // Same (m1, alice) but a *different* variant → counts separately.
+    m.recordMomentRailClick('m1', 'arc_strength', 'alice');
+    const r = m.rollup(7).at(-1)!;
+    expect(r.momentRailClicks).toBe(4);
+    expect(r.momentRailClicksByVariant).toEqual({ freshest: 3, arc_strength: 1 });
   });
 
-  test('rolls past per-source cap into the floor counter', () => {
+  test('rolls past per-key cap into the per-variant floor counter', () => {
     const m = new StickyMetrics({
       now: clockAt('2026-04-26T10:00:00Z'),
       maxMomentVisitorsPerDay: 2,
     });
-    m.recordMomentRailClick('m1', 'a');
-    m.recordMomentRailClick('m1', 'b');
-    m.recordMomentRailClick('m1', 'c'); // overflow → floor
-    m.recordMomentRailClick('m1', 'd'); // overflow → floor
-    expect(m.rollup(7).at(-1)!.momentRailClicks).toBe(4);
+    m.recordMomentRailClick('m1', 'freshest', 'a');
+    m.recordMomentRailClick('m1', 'freshest', 'b');
+    m.recordMomentRailClick('m1', 'freshest', 'c'); // overflow → floor
+    m.recordMomentRailClick('m1', 'freshest', 'd'); // overflow → floor
+    m.recordMomentRailClick('m1', 'arc_strength', 'a'); // separate variant bucket
+    const r = m.rollup(7).at(-1)!;
+    expect(r.momentRailClicks).toBe(5);
+    expect(r.momentRailClicksByVariant).toEqual({ freshest: 4, arc_strength: 1 });
   });
 
   test('ignores empty inputs', () => {
     const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
-    m.recordMomentRailClick('', 'alice');
-    m.recordMomentRailClick('m1', '');
+    m.recordMomentRailClick('', 'freshest', 'alice');
+    m.recordMomentRailClick('m1', 'freshest', '');
     expect(m.rollup(7).at(-1)!.momentRailClicks).toBe(0);
   });
 
-  test('survives load-write-load with the same dedup state', async () => {
+  test('survives load-write-load with the same per-variant dedup state', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'sticky-rail-'));
     const ref = { ms: Date.parse('2026-04-26T10:00:00Z') };
     const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
     await m1.load();
-    m1.recordMomentRailClick('m1', 'alice');
+    m1.recordMomentRailClick('m1', 'freshest', 'alice');
+    m1.recordMomentRailClick('m1', 'arc_strength', 'alice');
     await m1.flush();
 
     const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
     await m2.load();
-    expect(m2.rollup(7).at(-1)!.momentRailClicks).toBe(1);
-    // Same tuple after reload still dedupes.
-    m2.recordMomentRailClick('m1', 'alice');
-    expect(m2.rollup(7).at(-1)!.momentRailClicks).toBe(1);
+    const r = m2.rollup(7).at(-1)!;
+    expect(r.momentRailClicks).toBe(2);
+    expect(r.momentRailClicksByVariant).toEqual({ freshest: 1, arc_strength: 1 });
+    // Same tuple after reload still dedupes per-variant.
+    m2.recordMomentRailClick('m1', 'freshest', 'alice');
+    m2.recordMomentRailClick('m1', 'arc_strength', 'alice');
+    expect(m2.rollup(7).at(-1)!.momentRailClicks).toBe(2);
+  });
+});
+
+describe('StickyMetrics.recordMomentRailImpression (TINA-1020)', () => {
+  test('dedupes per (source moment, variant, visitor) per day', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-27T10:00:00Z') });
+    m.recordMomentRailImpression('m1', 'freshest', 'alice');
+    m.recordMomentRailImpression('m1', 'freshest', 'alice'); // dedupe
+    m.recordMomentRailImpression('m1', 'freshest', 'bob');
+    m.recordMomentRailImpression('m1', 'arc_strength', 'alice');
+    const r = m.rollup(7).at(-1)!;
+    expect(r.momentRailImpressions).toBe(3);
+    expect(r.momentRailImpressionsByVariant).toEqual({ freshest: 2, arc_strength: 1 });
+  });
+
+  test('overflow climbs the per-variant floor', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-27T10:00:00Z'),
+      maxMomentVisitorsPerDay: 1,
+    });
+    m.recordMomentRailImpression('m1', 'arc_strength', 'a');
+    m.recordMomentRailImpression('m1', 'arc_strength', 'b'); // floor
+    m.recordMomentRailImpression('m1', 'arc_strength', 'c'); // floor
+    const r = m.rollup(7).at(-1)!;
+    expect(r.momentRailImpressionsByVariant.arc_strength).toBe(3);
+    expect(r.momentRailImpressionsByVariant.freshest).toBe(0);
+  });
+
+  test('ignores empty inputs', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-27T10:00:00Z') });
+    m.recordMomentRailImpression('', 'freshest', 'alice');
+    m.recordMomentRailImpression('m1', 'freshest', '');
+    expect(m.rollup(7).at(-1)!.momentRailImpressions).toBe(0);
+  });
+});
+
+describe('StickyMetrics rail legacy migration (TINA-1020)', () => {
+  test('legacy un-prefixed click keys load as freshest', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-rail-legacy-'));
+    // Simulate a payload written by a pre-TINA-1020 build: id is the bare
+    // source moment id, no `${variant}::` prefix, and the floor counter is a
+    // single number.
+    const legacy = {
+      version: 1,
+      days: [
+        {
+          date: '2026-04-26',
+          shares: 0,
+          momentVisitors: [],
+          momentExtraVisits: 0,
+          returns24h: 0,
+          returns7d: 0,
+          momentRailClickVisitors: [{ id: 'm1', visitors: ['alice', 'bob'] }],
+          momentRailClickExtra: 5,
+        },
+      ],
+      visitors: [],
+    };
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(join(dir, STICKY_METRICS_FILE), `${JSON.stringify(legacy)}\n`, 'utf8');
+    const m = new StickyMetrics({ dir, now: clockAt('2026-04-26T10:00:00Z') });
+    await m.load();
+    const r = m.rollup(7).at(-1)!;
+    expect(r.momentRailClicks).toBe(7);
+    expect(r.momentRailClicksByVariant).toEqual({ freshest: 7, arc_strength: 0 });
   });
 });
 
