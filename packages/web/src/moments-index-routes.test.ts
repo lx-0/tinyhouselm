@@ -463,7 +463,8 @@ describe('MomentsIndexRoutes /moments/og.png (TINA-1092)', () => {
       },
       end(body?: string | Buffer) {
         if (Buffer.isBuffer(body)) {
-          state.binary = body;
+          // Copy to widen ArrayBufferLike → ArrayBuffer (matches og-routes.test).
+          state.binary = Buffer.from(body);
         } else {
           state.body = body ?? '';
         }
