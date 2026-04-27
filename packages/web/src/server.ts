@@ -22,6 +22,7 @@ import {
 } from '@tina/sim';
 import { build as esbuild } from 'esbuild';
 import { ArcRoutes } from './arc-routes.js';
+import { ArcsIndexRoutes } from './arcs-index-routes.js';
 import { createBudget, resolveBudgetCap } from './budget.js';
 import { CharacterRoutes } from './character-routes.js';
 import { CharactersIndexRoutes } from './characters-index-routes.js';
@@ -164,6 +165,18 @@ const CHARACTERS_INDEX_OG_CACHE_DIR = isAbsolute(CHARACTERS_INDEX_OG_CACHE_DIR_E
   ? CHARACTERS_INDEX_OG_CACHE_DIR_ENV
   : resolve(process.cwd(), CHARACTERS_INDEX_OG_CACHE_DIR_ENV);
 const CHARACTERS_INDEX_OG_LRU_SIZE = Number(process.env.CHARACTERS_INDEX_OG_LRU_SIZE ?? 16);
+
+// Arcs-index OG image (TINA-1215). Keyed on (top-pairs hash, freshest pair-
+// moment id) so the card refreshes when the leaderboard shifts or a new pair-
+// moment lands. The leaderboard is stable across many ticks for a small named
+// roster, so the effective key churn is similar to MOMENTS_INDEX above.
+// Defaults to a small LRU.
+const ARCS_INDEX_OG_CACHE_DIR_ENV =
+  process.env.ARCS_INDEX_OG_CACHE_DIR ?? './data/arcs-index-og-cache';
+const ARCS_INDEX_OG_CACHE_DIR = isAbsolute(ARCS_INDEX_OG_CACHE_DIR_ENV)
+  ? ARCS_INDEX_OG_CACHE_DIR_ENV
+  : resolve(process.cwd(), ARCS_INDEX_OG_CACHE_DIR_ENV);
+const ARCS_INDEX_OG_LRU_SIZE = Number(process.env.ARCS_INDEX_OG_LRU_SIZE ?? 16);
 
 // Multi-character group co-presence moments (TINA-345).
 const GROUP_MOMENTS_ENABLED =
@@ -914,6 +927,44 @@ async function main(): Promise<void> {
     });
   }
 
+  // Arcs-index page + OG image (TINA-1215). Closes the public-index symmetry —
+  // every per-:slug surface had a public page, but the *index* over named-pair
+  // relationship arcs was admin-only. Pure read-side aggregation over
+  // RelationshipStore + MomentRecord LRU; same rate-limit + visitor-stamp
+  // shape as `/characters` (TINA-1162).
+  const arcsIndexOgCache =
+    moments && relationships
+      ? new OgCache({
+          dir: ARCS_INDEX_OG_CACHE_DIR,
+          maxEntries: ARCS_INDEX_OG_LRU_SIZE,
+          log: (level, event, fields) => log[level](event, fields),
+        })
+      : null;
+  const arcsIndexRoutes =
+    moments && relationships
+      ? new ArcsIndexRoutes({
+          named,
+          moments,
+          relationships,
+          publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+          ogCache: arcsIndexOgCache,
+          log: (level, event, fields) => log[level](event, fields),
+          onOgRender: (ip) => {
+            // Mirrors `charactersIndexOgRenders` — crawler bots rarely carry
+            // the cookie, so the IP fallback gives us a reasonable per-visitor
+            // count for the (single, global) arcs-index card.
+            stickyMetrics?.recordArcsIndexOgRender(ip);
+          },
+        })
+      : null;
+  if (arcsIndexRoutes?.hasOgImage()) {
+    log.info('arcs_index.og.ready', {
+      dir: ARCS_INDEX_OG_CACHE_DIR,
+      ogLruSize: ARCS_INDEX_OG_LRU_SIZE,
+      named: named.length,
+    });
+  }
+
   // Daily moment digest (TINA-684). Aggregates the day's top N moments at
   // request time from the live MomentRecord LRU + RelationshipStore — no
   // new persistence. OG image cached in its own disk-LRU keyed by sim-day.
@@ -1166,6 +1217,27 @@ async function main(): Promise<void> {
       const outcome = zoneRoutes.handleZonePage(req, res, rawName);
       if (outcome.status === 200 && stickyMetrics && visitorId && outcome.canonicalName) {
         stickyMetrics.recordZoneView(outcome.canonicalName, visitorId);
+      }
+      return;
+    }
+    // Arcs-index OG image MUST come before the /arc/:slug + /arcs HTML pages
+    // since they share the `/arc` prefix (TINA-1215).
+    if (arcsIndexRoutes?.hasOgImage() && req.method === 'GET' && url.pathname === '/arcs/og.png') {
+      await arcsIndexRoutes.handleArcsIndexOgImage(req, res);
+      return;
+    }
+    if (
+      arcsIndexRoutes &&
+      req.method === 'GET' &&
+      (url.pathname === '/arcs' || url.pathname === '/arcs/')
+    ) {
+      // Stamp the visitor cookie up-front so dedup keys land on first hit.
+      // Counter bump is conditional on a 200 — rate-limited hits stay out of
+      // the dedup set, mirroring `/characters`.
+      const visitorId = stickyMetrics ? resolveVisitor(req, res) : null;
+      const outcome = arcsIndexRoutes.handleIndexPage(req, res, url.searchParams);
+      if (outcome.status === 200 && stickyMetrics && visitorId) {
+        stickyMetrics.recordArcsIndexView(visitorId);
       }
       return;
     }

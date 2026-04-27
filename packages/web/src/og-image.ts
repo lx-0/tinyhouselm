@@ -1246,3 +1246,182 @@ export function composeCharactersIndexOg(input: CharactersIndexOgInput): Buffer 
 
   return encodePng(OG_WIDTH, OG_HEIGHT, c.buf);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Arcs-index OG composition (TINA-1215)                                      */
+/* -------------------------------------------------------------------------- */
+
+export interface ArcsIndexOgInput {
+  /**
+   * Top named pairs by arc strength, drawn as glyph doublets in a single
+   * row. Capped at 6 by the caller — extras roll into a `+N MORE` pill
+   * underneath, mirroring the moments/characters-index overflow chip.
+   */
+  pairs: Array<{
+    aColor: string | null;
+    bColor: string | null;
+    aFirst: string;
+    bFirst: string;
+    arcLabel: string;
+  }>;
+  /** Total named-pair count (pre-cap) for the header subtitle + footer chip. */
+  totalPairCount: number;
+  /**
+   * Strongest pair's arc label, or null when no pairs exist. Surfaced as a
+   * gold chip in the header — matches the per-character TINA-882 pattern.
+   */
+  topArcLabel: string | null;
+  /**
+   * Freshest pair-moment headline. Empty string falls back to a quiet line
+   * so a cold sim still produces a readable card.
+   */
+  freshestHeadline: string;
+}
+
+/** Cap on pair-doublets drawn into the OG card. Overflow shows `+N MORE`. */
+const ARCS_INDEX_OG_PAIR_CAP = 6;
+
+/**
+ * Compose a 1200×630 PNG card for `/arcs`. Reuses the moments/characters-index
+ * chrome (panel bars + accent palette) but swaps in a `TINA · ARCS` header,
+ * a chunky `RELATIONSHIP ARCS` title, a single-row strip of pair-doublets
+ * (glyph + ampersand + glyph) with first-name abbreviations beneath each
+ * doublet, and a footer that combines the pair count with the freshest
+ * pair-moment headline. Deterministic — same input produces identical bytes,
+ * which is what the OG cache key relies on.
+ */
+export function composeArcsIndexOg(input: ArcsIndexOgInput): Buffer {
+  const c = new PixelCanvas(OG_WIDTH, OG_HEIGHT);
+  c.fill(BG);
+
+  // Header bar.
+  c.fillRect(0, 0, OG_WIDTH, 80, PANEL);
+  c.drawText(48, 32, 'TINA · ARCS', ACCENT, 4);
+  if (input.topArcLabel) {
+    const chip = normalizeForFont(`TOP ${input.topArcLabel.toUpperCase()}`);
+    const chipW = measureText(chip, 3);
+    c.drawText(OG_WIDTH - chipW - 48, 36, chip, HALO, 3);
+  } else {
+    const subtitle = normalizeForFont(`${input.totalPairCount} PAIRS`);
+    const subtitleWidth = measureText(subtitle, 3);
+    c.drawText(OG_WIDTH - subtitleWidth - 48, 36, subtitle, MUTED, 3);
+  }
+
+  // Footer bar + branding.
+  c.fillRect(0, OG_HEIGHT - 80, OG_WIDTH, 80, PANEL);
+  c.drawText(48, OG_HEIGHT - 50, 'TINA · TINYHOUSE', ACCENT, 3);
+  const footerBadge = normalizeForFont(
+    input.totalPairCount === 1 ? '1 PAIR' : `${input.totalPairCount} PAIRS`,
+  );
+  const badgeW = measureText(footerBadge, 3);
+  c.drawText(OG_WIDTH - badgeW - 48, OG_HEIGHT - 50, footerBadge, MUTED, 3);
+
+  // Big "RELATIONSHIP ARCS" title — visual anchor at the same scale as the
+  // sibling index cards.
+  const title = 'RELATIONSHIP ARCS';
+  const titleScale = 7;
+  const titleW = measureText(title, titleScale);
+  const titleY = 140;
+  c.drawText(Math.floor((OG_WIDTH - titleW) / 2), titleY, title, FG, titleScale);
+
+  // Single-row pair strip. Each doublet = small glyph + small `&` + small
+  // glyph, with the first-name abbreviations beneath. All glyphs get the gold
+  // halo (everyone here is named).
+  const pairs = input.pairs.slice(0, ARCS_INDEX_OG_PAIR_CAP);
+  const overflow = Math.max(0, input.totalPairCount - pairs.length);
+  const glyphRadius = 30;
+  const haloRadius = glyphRadius + 6;
+  const intraGap = 28;
+  const interGap = 64;
+  const doubletWidth = 4 * haloRadius + intraGap;
+  const glyphCenterY = 320;
+
+  if (pairs.length > 0) {
+    const totalWidth = pairs.length * doubletWidth + (pairs.length - 1) * interGap;
+    let x = Math.floor((OG_WIDTH - totalWidth) / 2);
+    for (const pair of pairs) {
+      const cxA = x + haloRadius;
+      const cxB = cxA + 2 * haloRadius + intraGap;
+      const colorA = participantColor(pair.aColor);
+      const colorB = participantColor(pair.bColor);
+      // Halo + body for both glyphs.
+      c.strokeCircle(cxA, glyphCenterY, haloRadius, glyphRadius + 2, HALO);
+      c.fillCircle(cxA, glyphCenterY, glyphRadius, colorA);
+      c.strokeCircle(cxB, glyphCenterY, haloRadius, glyphRadius + 2, HALO);
+      c.fillCircle(cxB, glyphCenterY, glyphRadius, colorB);
+      // Initial inside each glyph.
+      const initialA = (pair.aFirst[0] ?? '?').toUpperCase();
+      const initialB = (pair.bFirst[0] ?? '?').toUpperCase();
+      const initialScale = 4;
+      const initialAW = measureText(initialA, initialScale);
+      const initialBW = measureText(initialB, initialScale);
+      const initialH = FONT_HEIGHT * initialScale;
+      c.drawText(
+        cxA - Math.floor(initialAW / 2),
+        glyphCenterY - Math.floor(initialH / 2),
+        initialA,
+        BG,
+        initialScale,
+      );
+      c.drawText(
+        cxB - Math.floor(initialBW / 2),
+        glyphCenterY - Math.floor(initialH / 2),
+        initialB,
+        BG,
+        initialScale,
+      );
+      // Ampersand between the two glyphs.
+      const ampScale = 4;
+      const ampW = measureText('&', ampScale);
+      const ampH = FONT_HEIGHT * ampScale;
+      const ampX = Math.floor((cxA + cxB) / 2 - ampW / 2);
+      c.drawText(ampX, glyphCenterY - Math.floor(ampH / 2), '&', HALO, ampScale);
+      // First-name abbreviation row beneath each doublet — `AAAA / BBBB`.
+      const abbrevRaw = normalizeForFont(
+        `${pair.aFirst.slice(0, 4).toUpperCase()}/${pair.bFirst.slice(0, 4).toUpperCase()}`,
+      );
+      if (abbrevRaw.length > 0) {
+        const abbrevScale = 2;
+        const abbrevW = measureText(abbrevRaw, abbrevScale);
+        const abbrevX = Math.floor((cxA + cxB) / 2 - abbrevW / 2);
+        c.drawText(abbrevX, glyphCenterY + haloRadius + 14, abbrevRaw, FG, abbrevScale);
+      }
+      x += doubletWidth + interGap;
+    }
+  }
+  if (overflow > 0) {
+    const pill = normalizeForFont(`+${overflow} MORE`);
+    const w = measureText(pill, 3);
+    const pillY = pairs.length > 0 ? glyphCenterY + haloRadius + 50 : glyphCenterY;
+    c.drawText(Math.floor((OG_WIDTH - w) / 2), pillY, pill, MUTED, 3);
+  }
+  if (pairs.length === 0 && overflow === 0) {
+    const empty = normalizeForFont('NO ARCS YET');
+    const w = measureText(empty, 4);
+    c.drawText(Math.floor((OG_WIDTH - w) / 2), glyphCenterY, empty, MUTED, 4);
+  }
+
+  // Footer headline — wraps to up to 2 lines, scale 4 to match other index
+  // cards. Empty headline falls back to a quiet line so a cold sim still
+  // produces a readable card.
+  const headlineSource = input.freshestHeadline.trim() || 'no shared moments yet';
+  const headline = normalizeForFont(headlineSource.toUpperCase());
+  const headlineScale = 4;
+  const headlineLineHeight = FONT_HEIGHT * headlineScale + 12;
+  const headlineMaxPx = OG_WIDTH - 96;
+  const lines = wrapText(headline, headlineMaxPx, headlineScale, 2);
+  const headlineBlockHeight = lines.length * headlineLineHeight - 12;
+  const headlineY = OG_HEIGHT - 80 - 40 - headlineBlockHeight;
+  for (let i = 0; i < lines.length; i++) {
+    const lineW = measureText(lines[i]!, headlineScale);
+    c.drawText(
+      Math.floor((OG_WIDTH - lineW) / 2),
+      headlineY + i * headlineLineHeight,
+      lines[i]!,
+      FG,
+      headlineScale,
+    );
+  }
+
+  return encodePng(OG_WIDTH, OG_HEIGHT, c.buf);
+}

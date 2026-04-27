@@ -399,7 +399,7 @@ export class CharactersIndexRoutes {
     ${rowsHtml}
     <footer>
       <span>${rows.length === 1 ? '1 character' : `${rows.length} characters`}</span>
-      <span><a href="/moments">all moments →</a></span>
+      <span><a href="/arcs">arcs →</a> · <a href="/moments">all moments →</a></span>
     </footer>
   </main>
 </body>

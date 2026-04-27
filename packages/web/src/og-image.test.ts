@@ -5,6 +5,7 @@ import {
   OG_WIDTH,
   PixelCanvas,
   composeArcOg,
+  composeArcsIndexOg,
   composeCharacterOg,
   composeCharactersIndexOg,
   composeMomentOg,
@@ -536,6 +537,90 @@ describe('composeCharactersIndexOg', () => {
       characters: ten,
       headline: 'busy day',
       totalCharacterCount: 14,
+    });
+    expect(capped.equals(overflow)).toBe(false);
+  });
+});
+
+describe('composeArcsIndexOg', () => {
+  const baseInput = {
+    pairs: [
+      {
+        aColor: '#ffaaaa',
+        bColor: '#aaffff',
+        aFirst: 'Mei',
+        bFirst: 'Hiro',
+        arcLabel: 'warming',
+      },
+      {
+        aColor: '#cccccc',
+        bColor: '#aaffff',
+        aFirst: 'Ava',
+        bFirst: 'Hiro',
+        arcLabel: 'cooling',
+      },
+    ],
+    totalPairCount: 2,
+    topArcLabel: 'warming',
+    freshestHeadline: 'Mei and Hiro caught up at the counter',
+  };
+
+  test('renders a 1200x630 PNG for a populated leaderboard', () => {
+    const png = composeArcsIndexOg(baseInput);
+    expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    expect(png.readUInt32BE(16)).toBe(OG_WIDTH);
+    expect(png.readUInt32BE(20)).toBe(OG_HEIGHT);
+  });
+
+  test('is deterministic — same input produces the same bytes', () => {
+    const a = composeArcsIndexOg(baseInput);
+    const b = composeArcsIndexOg(baseInput);
+    expect(a.equals(b)).toBe(true);
+  });
+
+  test('different headlines produce different bytes', () => {
+    const a = composeArcsIndexOg({ ...baseInput, freshestHeadline: 'first headline' });
+    const b = composeArcsIndexOg({ ...baseInput, freshestHeadline: 'second totally different' });
+    expect(a.equals(b)).toBe(false);
+  });
+
+  test('different top arc label produces different bytes (header chip)', () => {
+    const a = composeArcsIndexOg({ ...baseInput, topArcLabel: 'warming' });
+    const b = composeArcsIndexOg({ ...baseInput, topArcLabel: 'cooling' });
+    expect(a.equals(b)).toBe(false);
+  });
+
+  test('falls back gracefully on an empty leaderboard (no pairs)', () => {
+    const png = composeArcsIndexOg({
+      pairs: [],
+      totalPairCount: 0,
+      topArcLabel: null,
+      freshestHeadline: '',
+    });
+    expect(png.length).toBeGreaterThan(1000);
+    const populated = composeArcsIndexOg(baseInput);
+    expect(png.equals(populated)).toBe(false);
+  });
+
+  test('renders a "+N MORE" pill when totalPairCount exceeds 6', () => {
+    const six = Array.from({ length: 6 }, (_, i) => ({
+      aColor: '#aaaaaa',
+      bColor: '#bbbbbb',
+      aFirst: `A${i}`,
+      bFirst: `B${i}`,
+      arcLabel: 'warming',
+    }));
+    const capped = composeArcsIndexOg({
+      pairs: six,
+      totalPairCount: 6,
+      topArcLabel: 'warming',
+      freshestHeadline: 'busy week',
+    });
+    const overflow = composeArcsIndexOg({
+      pairs: six,
+      totalPairCount: 9,
+      topArcLabel: 'warming',
+      freshestHeadline: 'busy week',
     });
     expect(capped.equals(overflow)).toBe(false);
   });

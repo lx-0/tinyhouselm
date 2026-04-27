@@ -57,6 +57,8 @@ describe('StickyMetrics.recordShare', () => {
       momentsIndexOgRenders: 0,
       charactersIndexViews: 0,
       charactersIndexOgRenders: 0,
+      arcsIndexViews: 0,
+      arcsIndexOgRenders: 0,
       momentRailClicks: 0,
       momentRailClicksByVariant: { freshest: 0, arc_strength: 0 },
       momentRailImpressions: 0,

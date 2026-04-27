@@ -688,7 +688,7 @@ function renderArcHtmlBody(input: RenderInput): string {
       <h2>Moments together</h2>
       ${momentsHtml}
     </section>
-    <footer>arc · ${escapeHtml(payload.pair.canonicalSlug)} · <a href="/character/${escapeHtml(a.id)}">${escapeHtml(a.name)}</a> · <a href="/character/${escapeHtml(b.id)}">${escapeHtml(b.name)}</a> · <a href="/digest/today">today's digest</a></footer>
+    <footer>arc · ${escapeHtml(payload.pair.canonicalSlug)} · <a href="/character/${escapeHtml(a.id)}">${escapeHtml(a.name)}</a> · <a href="/character/${escapeHtml(b.id)}">${escapeHtml(b.name)}</a> · <a href="/arcs">all arcs →</a> · <a href="/digest/today">today's digest</a></footer>
   </main>
 </body>
 </html>`;
