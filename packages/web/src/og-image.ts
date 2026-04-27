@@ -984,3 +984,118 @@ function footerBadgeFor(
   if (variant === 'conversation') return 'CONVERSATION';
   return 'CHARACTER';
 }
+
+/* -------------------------------------------------------------------------- */
+/* Moments-index OG composition (TINA-1092)                                   */
+/* -------------------------------------------------------------------------- */
+
+export interface MomentsIndexOgInput {
+  /**
+   * Distinct named participants across the freshest window of MomentRecords,
+   * newest-first. Capped at 8 by the caller — extras roll into a "+N" pill
+   * underneath the row, mirroring the digest/zone overflow chip.
+   */
+  participants: Array<{ name: string; color: string | null }>;
+  /**
+   * Headline of the single freshest record. Empty string falls back to the
+   * "no moments yet" line so a cold sim still renders a useful card.
+   */
+  headline: string;
+  /**
+   * Sim-day of the freshest record (0-indexed) — surfaced as `SD-N` in the
+   * footer chip and matched up with `/digest/sd-N`.
+   */
+  simDay: number;
+  /** Total moments retained by the LRU. Surfaced as a header subtitle chip. */
+  momentsCount: number;
+  /**
+   * Total participant count (pre-cap) so we can render `+N MORE` when the
+   * roster exceeds the row capacity. Pass `participants.length` when you
+   * haven't capped on the caller side.
+   */
+  totalParticipantCount?: number;
+}
+
+/**
+ * Compose a 1200×630 PNG card for `/moments`. Reuses the zone/character chrome
+ * (panel bars + accent palette + glyph row) but swaps in a `TINA · MOMENTS`
+ * header, a chunky `LATEST MOMENTS` title, a single-row glyph strip of the
+ * freshest 8 named participants, the freshest moment headline, and an `SD-N`
+ * footer chip so crawlers can tell at a glance which sim-day they're looking
+ * at. Deterministic — same input produces identical bytes, which is what the
+ * OG cache key relies on.
+ */
+export function composeMomentsIndexOg(input: MomentsIndexOgInput): Buffer {
+  const c = new PixelCanvas(OG_WIDTH, OG_HEIGHT);
+  c.fill(BG);
+
+  // Header bar.
+  c.fillRect(0, 0, OG_WIDTH, 80, PANEL);
+  c.drawText(48, 32, 'TINA · MOMENTS', ACCENT, 4);
+  const subtitle = normalizeForFont(`${input.momentsCount} MOMENTS`);
+  const subtitleWidth = measureText(subtitle, 3);
+  c.drawText(OG_WIDTH - subtitleWidth - 48, 36, subtitle, MUTED, 3);
+
+  // Footer bar + branding.
+  c.fillRect(0, OG_HEIGHT - 80, OG_WIDTH, 80, PANEL);
+  c.drawText(48, OG_HEIGHT - 50, 'TINA · TINYHOUSE', ACCENT, 3);
+  const dayBadge = normalizeForFont(`SD-${input.simDay}`);
+  const dayBadgeWidth = measureText(dayBadge, 3);
+  c.drawText(OG_WIDTH - dayBadgeWidth - 48, OG_HEIGHT - 50, dayBadge, MUTED, 3);
+
+  // Big "LATEST MOMENTS" title — visual anchor, mirrors zone-card title scale.
+  const title = 'LATEST MOMENTS';
+  const titleScale = 8;
+  const titleW = measureText(title, titleScale);
+  const titleY = 140;
+  c.drawText(Math.floor((OG_WIDTH - titleW) / 2), titleY, title, FG, titleScale);
+
+  // Single-row participant glyphs centered below the title. Cap at 8 — extras
+  // get a "+N MORE" pill underneath the row so the layout doesn't reflow when
+  // the roster grows. All participants here are named (caller filters), so
+  // every glyph gets the gold halo.
+  const parts = input.participants.slice(0, 8);
+  const totalCount = input.totalParticipantCount ?? input.participants.length;
+  const overflow = Math.max(0, totalCount - parts.length);
+  const glyphRadius = 36;
+  const haloRadius = glyphRadius + 8;
+  const glyphSpacing = 130;
+  const glyphCenterY = 320;
+  drawDigestGlyphRow(
+    c,
+    parts.map((p) => ({ name: p.name, named: true, color: p.color })),
+    glyphCenterY,
+    glyphRadius,
+    haloRadius,
+    glyphSpacing,
+  );
+  if (overflow > 0) {
+    const pill = normalizeForFont(`+${overflow} MORE`);
+    const w = measureText(pill, 3);
+    c.drawText(Math.floor((OG_WIDTH - w) / 2), glyphCenterY + haloRadius + 24, pill, MUTED, 3);
+  }
+
+  // Headline — center, wraps to up to 2 lines, scale 4 to match the rest of
+  // the card family. Empty headline falls back to a quiet line so a freshly
+  // booted sim with no moments still produces a readable card.
+  const headlineSource = input.headline.trim() || 'no moments yet — check back soon';
+  const headline = normalizeForFont(headlineSource.toUpperCase());
+  const headlineScale = 4;
+  const headlineLineHeight = FONT_HEIGHT * headlineScale + 12;
+  const headlineMaxPx = OG_WIDTH - 96;
+  const lines = wrapText(headline, headlineMaxPx, headlineScale, 2);
+  const headlineBlockHeight = lines.length * headlineLineHeight - 12;
+  const headlineY = OG_HEIGHT - 80 - 40 - headlineBlockHeight;
+  for (let i = 0; i < lines.length; i++) {
+    const lineW = measureText(lines[i]!, headlineScale);
+    c.drawText(
+      Math.floor((OG_WIDTH - lineW) / 2),
+      headlineY + i * headlineLineHeight,
+      lines[i]!,
+      FG,
+      headlineScale,
+    );
+  }
+
+  return encodePng(OG_WIDTH, OG_HEIGHT, c.buf);
+}

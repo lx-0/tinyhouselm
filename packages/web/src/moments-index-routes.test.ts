@@ -5,6 +5,7 @@ import type { NamedPersona, RelationshipStore } from '@tina/sim';
 import { describe, expect, test } from 'vitest';
 import { MomentsIndexRoutes, buildFilterKey } from './moments-index-routes.js';
 import { MomentStore } from './moments.js';
+import { OgCache } from './og-routes.js';
 
 function mockReq(
   opts: {
@@ -425,6 +426,200 @@ describe('MomentsIndexRoutes.handleIndexPage', () => {
     expect(res.body).not.toContain('<b>Other</b>');
     expect(res.body).toContain('&lt;b&gt;Other&lt;/b&gt;');
     expect(res.body).toContain('&lt;scary&gt;');
+  });
+});
+
+describe('MomentsIndexRoutes /moments/og.png (TINA-1092)', () => {
+  function mockBinaryRes(): MockRes & { binary: Buffer } {
+    const state = {
+      statusCode: 0,
+      body: '',
+      binary: Buffer.alloc(0),
+      responseHeaders: {} as Record<string, string | string[]>,
+    };
+    const res = {
+      get statusCode() {
+        return state.statusCode;
+      },
+      set statusCode(v: number) {
+        state.statusCode = v;
+      },
+      get body() {
+        return state.body;
+      },
+      get binary() {
+        return state.binary;
+      },
+      get responseHeaders() {
+        return state.responseHeaders;
+      },
+      writeHead(status: number, headers?: Record<string, string | string[]>) {
+        state.statusCode = status;
+        if (headers) Object.assign(state.responseHeaders, headers);
+        return this;
+      },
+      setHeader(name: string, value: string | string[]) {
+        state.responseHeaders[name] = value;
+      },
+      end(body?: string | Buffer) {
+        if (Buffer.isBuffer(body)) {
+          state.binary = body;
+        } else {
+          state.body = body ?? '';
+        }
+      },
+    } as unknown as MockRes & { binary: Buffer };
+    return res;
+  }
+
+  function buildOgRoutes(
+    opts: {
+      moments?: MomentStore;
+      cache?: OgCache | null;
+      onOgRender?: (ip: string) => void;
+      perIpPerMin?: number;
+    } = {},
+  ) {
+    const named = [
+      fakePersona('mei-tanaka', 'Mei Tanaka'),
+      fakePersona('hiro-abe', 'Hiro Abe'),
+      fakePersona('ava-okafor', 'Ava Okafor'),
+    ];
+    const moments = opts.moments ?? makeStore({ named });
+    const cache = opts.cache === undefined ? new OgCache() : opts.cache;
+    const routes = new MomentsIndexRoutes({
+      named,
+      moments,
+      relationships: null,
+      simSpeed: 30,
+      publicBaseUrl: 'https://tinyhouse.up.railway.app',
+      ogCache: cache,
+      onOgRender: opts.onOgRender,
+      perIpPerMin: opts.perIpPerMin ?? 60,
+    });
+    return { routes, moments, cache };
+  }
+
+  test('hasOgImage() reflects whether the cache is wired', () => {
+    const { routes: with_ } = buildOgRoutes();
+    expect(with_.hasOgImage()).toBe(true);
+    const { routes: without } = buildOgRoutes({ cache: null });
+    expect(without.hasOgImage()).toBe(false);
+  });
+
+  test('200 PNG on first hit, x-og-cache: miss', async () => {
+    const { routes } = buildOgRoutes();
+    const res = mockBinaryRes();
+    await routes.handleMomentsIndexOgImage(mockReq(), res);
+    expect(res.statusCode).toBe(200);
+    expect(res.responseHeaders['content-type']).toBe('image/png');
+    expect(res.responseHeaders['x-og-cache']).toBe('miss');
+    expect(res.binary.length).toBeGreaterThan(1000);
+    // PNG signature.
+    expect(
+      res.binary
+        .subarray(0, 8)
+        .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+    ).toBe(true);
+  });
+
+  test('second hit serves from cache (x-og-cache: hit, identical bytes)', async () => {
+    const { routes } = buildOgRoutes();
+    const res1 = mockBinaryRes();
+    await routes.handleMomentsIndexOgImage(mockReq(), res1);
+    // Wait a tick so the fire-and-forget cache.set lands in the in-memory map.
+    await new Promise((r) => setImmediate(r));
+    const res2 = mockBinaryRes();
+    await routes.handleMomentsIndexOgImage(mockReq(), res2);
+    expect(res2.responseHeaders['x-og-cache']).toBe('hit');
+    expect(res2.binary.equals(res1.binary)).toBe(true);
+  });
+
+  test('cache key churns when the freshest moment changes', async () => {
+    const { routes, moments } = buildOgRoutes();
+    const res1 = mockBinaryRes();
+    await routes.handleMomentsIndexOgImage(mockReq(), res1);
+    await new Promise((r) => setImmediate(r));
+    // Append a new freshest moment — cache key should now be a miss.
+    moments.captureClose(
+      {
+        sessionId: 'fresh',
+        simTime: 50_000,
+        openedAt: 50_000,
+        transcript: [],
+        participants: [
+          { id: 'mei-tanaka', name: 'Mei Tanaka', named: true, color: '#abcdef' },
+          { id: 'ava-okafor', name: 'Ava Okafor', named: true, color: '#cccccc' },
+        ],
+        zone: 'park',
+        closeReason: 'idle',
+      },
+      deriveWorldClock(50_000, 30),
+    );
+    const res2 = mockBinaryRes();
+    await routes.handleMomentsIndexOgImage(mockReq(), res2);
+    expect(res2.responseHeaders['x-og-cache']).toBe('miss');
+    // Different freshest record + different participants ⇒ different bytes.
+    expect(res2.binary.equals(res1.binary)).toBe(false);
+  });
+
+  test('renders a fallback card on a cold sim (empty store)', async () => {
+    const empty = new MomentStore({ maxMoments: 5 });
+    const { routes } = buildOgRoutes({ moments: empty });
+    const res = mockBinaryRes();
+    await routes.handleMomentsIndexOgImage(mockReq(), res);
+    expect(res.statusCode).toBe(200);
+    expect(res.binary.length).toBeGreaterThan(1000);
+  });
+
+  test('404 when the OG cache is not wired', async () => {
+    const { routes } = buildOgRoutes({ cache: null });
+    const res = mockBinaryRes();
+    await routes.handleMomentsIndexOgImage(mockReq(), res);
+    expect(res.statusCode).toBe(404);
+  });
+
+  test('shares the per-IP rate limiter with the index page', async () => {
+    const { routes } = buildOgRoutes({ perIpPerMin: 2 });
+    // Two index hits exhaust the per-IP bucket.
+    expect(call(routes, '').out.status).toBe(200);
+    expect(call(routes, '').out.status).toBe(200);
+    const res = mockBinaryRes();
+    await routes.handleMomentsIndexOgImage(mockReq(), res);
+    expect(res.statusCode).toBe(429);
+    expect(res.responseHeaders['retry-after']).toBeDefined();
+  });
+
+  test('onOgRender callback fires with the requesting IP after a 200', async () => {
+    const seen: string[] = [];
+    const { routes } = buildOgRoutes({ onOgRender: (ip) => seen.push(ip) });
+    const res = mockBinaryRes();
+    await routes.handleMomentsIndexOgImage(mockReq({ remoteAddress: '203.0.113.7' }), res);
+    expect(res.statusCode).toBe(200);
+    expect(seen).toEqual(['203.0.113.7']);
+  });
+
+  test('HTML index page emits og:image meta tags when the OG cache is wired', () => {
+    const { routes } = buildOgRoutes();
+    const { res } = call(routes, '');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain(
+      '<meta property="og:image" content="https://tinyhouse.up.railway.app/moments/og.png" />',
+    );
+    expect(res.body).toContain('<meta property="og:image:width" content="1200" />');
+    expect(res.body).toContain('<meta property="og:image:height" content="630" />');
+    expect(res.body).toContain(
+      '<meta name="twitter:image" content="https://tinyhouse.up.railway.app/moments/og.png" />',
+    );
+    expect(res.body).toContain('<meta name="twitter:card" content="summary_large_image" />');
+  });
+
+  test('HTML index page falls back to text-card meta when OG cache is absent', () => {
+    const { routes } = buildOgRoutes({ cache: null });
+    const { res } = call(routes, '');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain('og:image');
+    expect(res.body).toContain('<meta name="twitter:card" content="summary" />');
   });
 });
 

@@ -172,6 +172,15 @@ interface DayState {
   /** Floor counter once a per-character dedup set hits its cap. */
   characterOgExtraRenders: number;
   /**
+   * Dedup set for `/moments/og.png` renders (TINA-1092). The index has a
+   * single global cache key — there is no per-resource scope — so a single
+   * Set<visitor-or-IP> is enough. Past the cap the floor counter climbs,
+   * mirroring `momentOgVisitors`.
+   */
+  momentsIndexOgVisitors: Set<string>;
+  /** Floor counter once the dedup set hits its cap. */
+  momentsIndexOgExtraRenders: number;
+  /**
    * Per-(variant, source-moment-id) dedup sets for related-moments rail clicks
    * on `/moment/:id` (TINA-952 + TINA-1020). The map key is
    * `${variant}::${sourceMomentId}`. Each set holds visitor ids (or raw IPs
@@ -245,6 +254,9 @@ interface PersistedDay {
   /** Absent on payloads written before TINA-882; loaded as empty + 0. */
   characterOgVisitors?: Array<{ id: string; visitors: string[] }>;
   characterOgExtraRenders?: number;
+  /** Absent on payloads written before TINA-1092; loaded as empty + 0. */
+  momentsIndexOgVisitors?: string[];
+  momentsIndexOgExtraRenders?: number;
   /**
    * Absent on payloads written before TINA-952; loaded as empty + 0.
    * Pre-TINA-1020 entries used un-prefixed `id` (just the source moment id).
@@ -340,6 +352,13 @@ export interface DailyRollup {
    * IP each count once per day.
    */
   characterOgRenders: number;
+  /**
+   * `/moments/og.png` renders this day (TINA-1092), deduped per (IP-or-
+   * visitor) per UTC day. Single global counter — the index has one cache
+   * key shared across filtered/unfiltered views. Mostly bumped by social-
+   * media crawlers like the other `*OgRenders` columns.
+   */
+  momentsIndexOgRenders: number;
   /**
    * Related-moments rail clicks on `/moment/:id` this day (TINA-952), deduped
    * per (source-moment, IP-or-visitor). The counter measures how many
@@ -562,6 +581,9 @@ export class StickyMetrics {
           characterOgVisitors.set(row.id, set);
         }
       }
+      const momentsIndexOgVisitors = new Set<string>(
+        Array.isArray(d.momentsIndexOgVisitors) ? d.momentsIndexOgVisitors : [],
+      );
       const momentRailClickVisitors = new Map<string, Set<string>>();
       if (Array.isArray(d.momentRailClickVisitors)) {
         for (const row of d.momentRailClickVisitors) {
@@ -618,6 +640,8 @@ export class StickyMetrics {
         arcOgExtraRenders: Number(d.arcOgExtraRenders) || 0,
         characterOgVisitors,
         characterOgExtraRenders: Number(d.characterOgExtraRenders) || 0,
+        momentsIndexOgVisitors,
+        momentsIndexOgExtraRenders: Number(d.momentsIndexOgExtraRenders) || 0,
         momentRailClickVisitors,
         momentRailClickExtraByVariant: clickExtraByVariant,
         momentRailImpressionVisitors,
@@ -831,6 +855,25 @@ export class StickyMetrics {
       set.add(visitorOrIp);
     } else {
       day.characterOgExtraRenders += 1;
+    }
+    this.scheduleFlush();
+  }
+
+  /**
+   * Record a render of `/moments/og.png` (TINA-1092). Single global counter —
+   * the index has one cache key shared across filtered/unfiltered views, so
+   * dedup is per (visitor-or-IP) per UTC day with no per-resource scoping.
+   * Past the cap the dedup set stops growing and the floor counter climbs,
+   * mirroring `recordMomentOgRender`.
+   */
+  recordMomentsIndexOgRender(visitorOrIp: string): void {
+    if (!visitorOrIp) return;
+    const day = this.day(dayKeyUtc(this.now()));
+    if (day.momentsIndexOgVisitors.has(visitorOrIp)) return;
+    if (day.momentsIndexOgVisitors.size < this.maxMomentVisitorsPerDay) {
+      day.momentsIndexOgVisitors.add(visitorOrIp);
+    } else {
+      day.momentsIndexOgExtraRenders += 1;
     }
     this.scheduleFlush();
   }
@@ -1061,6 +1104,9 @@ export class StickyMetrics {
       if (d) {
         for (const set of d.characterOgVisitors.values()) characterOgRenders += set.size;
       }
+      const momentsIndexOgRenders = d
+        ? d.momentsIndexOgVisitors.size + d.momentsIndexOgExtraRenders
+        : 0;
       const clicksByVariant: Record<RailVariant, number> = {
         freshest: d?.momentRailClickExtraByVariant.freshest ?? 0,
         arc_strength: d?.momentRailClickExtraByVariant.arc_strength ?? 0,
@@ -1099,6 +1145,7 @@ export class StickyMetrics {
         arcViews,
         arcOgRenders,
         characterOgRenders,
+        momentsIndexOgRenders,
         momentRailClicks,
         momentRailClicksByVariant: clicksByVariant,
         momentRailImpressions,
@@ -1159,6 +1206,8 @@ export class StickyMetrics {
         arcOgExtraRenders: 0,
         characterOgVisitors: new Map(),
         characterOgExtraRenders: 0,
+        momentsIndexOgVisitors: new Set(),
+        momentsIndexOgExtraRenders: 0,
         momentRailClickVisitors: new Map(),
         momentRailClickExtraByVariant: { freshest: 0, arc_strength: 0 },
         momentRailImpressionVisitors: new Map(),
@@ -1301,6 +1350,8 @@ export class StickyMetrics {
           visitors: [...set],
         })),
         characterOgExtraRenders: d.characterOgExtraRenders,
+        momentsIndexOgVisitors: [...d.momentsIndexOgVisitors],
+        momentsIndexOgExtraRenders: d.momentsIndexOgExtraRenders,
         momentRailClickVisitors: [...d.momentRailClickVisitors.entries()].map(([id, set]) => ({
           id,
           visitors: [...set],

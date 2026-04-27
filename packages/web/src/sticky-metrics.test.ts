@@ -54,6 +54,7 @@ describe('StickyMetrics.recordShare', () => {
       arcViews: 0,
       arcOgRenders: 0,
       characterOgRenders: 0,
+      momentsIndexOgRenders: 0,
       momentRailClicks: 0,
       momentRailClicksByVariant: { freshest: 0, arc_strength: 0 },
       momentRailImpressions: 0,
@@ -814,6 +815,49 @@ describe('StickyMetrics.recordCharacterOgRender (TINA-882)', () => {
     // Same tuple after reload still dedupes.
     m2.recordCharacterOgRender('mei-tanaka', 'twitterbot');
     expect(m2.rollup(7).at(-1)!.characterOgRenders).toBe(1);
+  });
+});
+
+describe('StickyMetrics.recordMomentsIndexOgRender (TINA-1092)', () => {
+  test('dedupes per (visitor-or-IP) per day, single global bucket', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordMomentsIndexOgRender('twitterbot');
+    m.recordMomentsIndexOgRender('twitterbot'); // dedup
+    m.recordMomentsIndexOgRender('slackbot');
+    expect(m.rollup(7).at(-1)!.momentsIndexOgRenders).toBe(2);
+  });
+
+  test('caps the dedup set and counts overflow as extras', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-26T10:00:00Z'),
+      maxMomentVisitorsPerDay: 2,
+    });
+    m.recordMomentsIndexOgRender('a');
+    m.recordMomentsIndexOgRender('b');
+    m.recordMomentsIndexOgRender('c'); // overflow → floor counter
+    expect(m.rollup(7).at(-1)!.momentsIndexOgRenders).toBe(3);
+  });
+
+  test('ignores empty inputs', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordMomentsIndexOgRender('');
+    expect(m.rollup(7).at(-1)!.momentsIndexOgRenders).toBe(0);
+  });
+
+  test('persists across a load-write-load cycle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-iog-'));
+    const ref = { ms: Date.parse('2026-04-26T10:00:00Z') };
+    const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m1.load();
+    m1.recordMomentsIndexOgRender('twitterbot');
+    await m1.flush();
+
+    const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m2.load();
+    expect(m2.rollup(7).at(-1)!.momentsIndexOgRenders).toBe(1);
+    // Same visitor after reload still dedupes.
+    m2.recordMomentsIndexOgRender('twitterbot');
+    expect(m2.rollup(7).at(-1)!.momentsIndexOgRenders).toBe(1);
   });
 });
 
