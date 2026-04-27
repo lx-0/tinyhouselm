@@ -55,6 +55,8 @@ describe('StickyMetrics.recordShare', () => {
       arcOgRenders: 0,
       characterOgRenders: 0,
       momentsIndexOgRenders: 0,
+      charactersIndexViews: 0,
+      charactersIndexOgRenders: 0,
       momentRailClicks: 0,
       momentRailClicksByVariant: { freshest: 0, arc_strength: 0 },
       momentRailImpressions: 0,
@@ -858,6 +860,75 @@ describe('StickyMetrics.recordMomentsIndexOgRender (TINA-1092)', () => {
     // Same visitor after reload still dedupes.
     m2.recordMomentsIndexOgRender('twitterbot');
     expect(m2.rollup(7).at(-1)!.momentsIndexOgRenders).toBe(1);
+  });
+});
+
+describe('StickyMetrics.recordCharactersIndexView (TINA-1162)', () => {
+  test('dedupes per (visitor-or-IP) per day, single global bucket', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordCharactersIndexView('alice');
+    m.recordCharactersIndexView('alice'); // dedup
+    m.recordCharactersIndexView('bob');
+    expect(m.rollup(7).at(-1)!.charactersIndexViews).toBe(2);
+  });
+
+  test('caps the dedup set and counts overflow as extras', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-26T10:00:00Z'),
+      maxMomentVisitorsPerDay: 2,
+    });
+    m.recordCharactersIndexView('a');
+    m.recordCharactersIndexView('b');
+    m.recordCharactersIndexView('c'); // overflow → floor counter
+    expect(m.rollup(7).at(-1)!.charactersIndexViews).toBe(3);
+  });
+
+  test('ignores empty inputs', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordCharactersIndexView('');
+    expect(m.rollup(7).at(-1)!.charactersIndexViews).toBe(0);
+  });
+
+  test('persists across a load-write-load cycle', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sticky-cix-'));
+    const ref = { ms: Date.parse('2026-04-26T10:00:00Z') };
+    const m1 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m1.load();
+    m1.recordCharactersIndexView('alice');
+    await m1.flush();
+
+    const m2 = new StickyMetrics({ dir, now: clockFromRef(ref) });
+    await m2.load();
+    expect(m2.rollup(7).at(-1)!.charactersIndexViews).toBe(1);
+    m2.recordCharactersIndexView('alice');
+    expect(m2.rollup(7).at(-1)!.charactersIndexViews).toBe(1);
+  });
+});
+
+describe('StickyMetrics.recordCharactersIndexOgRender (TINA-1162)', () => {
+  test('dedupes per (visitor-or-IP) per day, single global bucket', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordCharactersIndexOgRender('twitterbot');
+    m.recordCharactersIndexOgRender('twitterbot'); // dedup
+    m.recordCharactersIndexOgRender('slackbot');
+    expect(m.rollup(7).at(-1)!.charactersIndexOgRenders).toBe(2);
+  });
+
+  test('caps the dedup set and counts overflow as extras', () => {
+    const m = new StickyMetrics({
+      now: clockAt('2026-04-26T10:00:00Z'),
+      maxMomentVisitorsPerDay: 2,
+    });
+    m.recordCharactersIndexOgRender('a');
+    m.recordCharactersIndexOgRender('b');
+    m.recordCharactersIndexOgRender('c'); // overflow → floor counter
+    expect(m.rollup(7).at(-1)!.charactersIndexOgRenders).toBe(3);
+  });
+
+  test('ignores empty inputs', () => {
+    const m = new StickyMetrics({ now: clockAt('2026-04-26T10:00:00Z') });
+    m.recordCharactersIndexOgRender('');
+    expect(m.rollup(7).at(-1)!.charactersIndexOgRenders).toBe(0);
   });
 });
 

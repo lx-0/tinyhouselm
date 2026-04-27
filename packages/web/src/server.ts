@@ -24,6 +24,7 @@ import { build as esbuild } from 'esbuild';
 import { ArcRoutes } from './arc-routes.js';
 import { createBudget, resolveBudgetCap } from './budget.js';
 import { CharacterRoutes } from './character-routes.js';
+import { CharactersIndexRoutes } from './characters-index-routes.js';
 import { DigestRoutes } from './digest-routes.js';
 import { InterventionHandlers } from './intervention.js';
 import { log } from './logger.js';
@@ -152,6 +153,17 @@ const MOMENTS_INDEX_OG_CACHE_DIR = isAbsolute(MOMENTS_INDEX_OG_CACHE_DIR_ENV)
   ? MOMENTS_INDEX_OG_CACHE_DIR_ENV
   : resolve(process.cwd(), MOMENTS_INDEX_OG_CACHE_DIR_ENV);
 const MOMENTS_INDEX_OG_LRU_SIZE = Number(process.env.MOMENTS_INDEX_OG_LRU_SIZE ?? 32);
+
+// Characters-index OG image (TINA-1162). Keyed on (cast hash, freshest moment
+// id) so the card refreshes on roster changes and on new moments. The cast is
+// stable across a boot, so the effective key churn is at the same rate as
+// MOMENTS_INDEX above. Defaults to a small LRU.
+const CHARACTERS_INDEX_OG_CACHE_DIR_ENV =
+  process.env.CHARACTERS_INDEX_OG_CACHE_DIR ?? './data/characters-index-og-cache';
+const CHARACTERS_INDEX_OG_CACHE_DIR = isAbsolute(CHARACTERS_INDEX_OG_CACHE_DIR_ENV)
+  ? CHARACTERS_INDEX_OG_CACHE_DIR_ENV
+  : resolve(process.cwd(), CHARACTERS_INDEX_OG_CACHE_DIR_ENV);
+const CHARACTERS_INDEX_OG_LRU_SIZE = Number(process.env.CHARACTERS_INDEX_OG_LRU_SIZE ?? 16);
 
 // Multi-character group co-presence moments (TINA-345).
 const GROUP_MOMENTS_ENABLED =
@@ -865,6 +877,43 @@ async function main(): Promise<void> {
     });
   }
 
+  // Characters index page + OG image (TINA-1162). Closes the named-entity
+  // index gap — every per-:slug surface (`/character/:id`, `/zone/:name`,
+  // `/arc/:slug`, `/digest/:date`, `/moment/:id`) had a public page, but
+  // only `/moments` and `/digest/today` were *index* surfaces. Pure read-side
+  // aggregation over the named-character registry + RelationshipStore +
+  // MomentRecord LRU; same rate-limit + visitor-stamp shape as `/moments`.
+  const charactersIndexOgCache = moments
+    ? new OgCache({
+        dir: CHARACTERS_INDEX_OG_CACHE_DIR,
+        maxEntries: CHARACTERS_INDEX_OG_LRU_SIZE,
+        log: (level, event, fields) => log[level](event, fields),
+      })
+    : null;
+  const charactersIndexRoutes = moments
+    ? new CharactersIndexRoutes({
+        named,
+        moments,
+        relationships,
+        publicBaseUrl: MOMENT_PUBLIC_BASE_URL,
+        ogCache: charactersIndexOgCache,
+        log: (level, event, fields) => log[level](event, fields),
+        onOgRender: (ip) => {
+          // Mirrors `momentsIndexOgRenders` — crawler bots rarely carry the
+          // cookie, so the IP fallback gives us a reasonable per-visitor
+          // count for the (single, global) characters-index card.
+          stickyMetrics?.recordCharactersIndexOgRender(ip);
+        },
+      })
+    : null;
+  if (charactersIndexRoutes?.hasOgImage()) {
+    log.info('characters_index.og.ready', {
+      dir: CHARACTERS_INDEX_OG_CACHE_DIR,
+      ogLruSize: CHARACTERS_INDEX_OG_LRU_SIZE,
+      named: named.length,
+    });
+  }
+
   // Daily moment digest (TINA-684). Aggregates the day's top N moments at
   // request time from the live MomentRecord LRU + RelationshipStore — no
   // new persistence. OG image cached in its own disk-LRU keyed by sim-day.
@@ -1137,6 +1186,31 @@ async function main(): Promise<void> {
       const outcome = arcRoutes.handleArcPage(req, res, rawSlug);
       if (outcome.status === 200 && stickyMetrics && visitorId && outcome.canonicalSlug) {
         stickyMetrics.recordArcView(outcome.canonicalSlug, visitorId);
+      }
+      return;
+    }
+    // Characters-index OG image MUST come before the /character/:name HTML
+    // page since they share the `/character` prefix (TINA-1162).
+    if (
+      charactersIndexRoutes?.hasOgImage() &&
+      req.method === 'GET' &&
+      url.pathname === '/characters/og.png'
+    ) {
+      await charactersIndexRoutes.handleCharactersIndexOgImage(req, res);
+      return;
+    }
+    if (
+      charactersIndexRoutes &&
+      req.method === 'GET' &&
+      (url.pathname === '/characters' || url.pathname === '/characters/')
+    ) {
+      // Stamp the visitor cookie up-front so dedup keys land on first hit.
+      // Counter bump is conditional on a 200 — rate-limited hits stay out of
+      // the dedup set, mirroring `/moments`.
+      const visitorId = stickyMetrics ? resolveVisitor(req, res) : null;
+      const outcome = charactersIndexRoutes.handleIndexPage(req, res);
+      if (outcome.status === 200 && stickyMetrics && visitorId) {
+        stickyMetrics.recordCharactersIndexView(visitorId);
       }
       return;
     }

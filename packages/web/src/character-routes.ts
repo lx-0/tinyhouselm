@@ -630,7 +630,7 @@ function renderCharacterHtmlBody(persona: NamedPersona, input: RenderInput): str
       <h2>Recent affordance uses</h2>
       ${affordancesHtml}
     </section>
-    <footer>character id · ${escapeHtml(m.id)}</footer>
+    <footer>character id · ${escapeHtml(m.id)} · <a href="/characters">← back to all characters</a></footer>
   </main>
 </body>
 </html>`;

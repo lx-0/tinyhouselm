@@ -477,7 +477,7 @@ export class MomentsIndexRoutes {
     ${filterChips}
     ${rowsHtml}
     ${pager}
-    <footer>moments retained by the in-memory LRU · share any row to keep it</footer>
+    <footer>moments retained by the in-memory LRU · share any row to keep it · <a href="/characters">cast →</a></footer>
   </main>
 </body>
 </html>`;

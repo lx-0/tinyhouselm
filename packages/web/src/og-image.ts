@@ -1099,3 +1099,150 @@ export function composeMomentsIndexOg(input: MomentsIndexOgInput): Buffer {
 
   return encodePng(OG_WIDTH, OG_HEIGHT, c.buf);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Characters-index OG composition (TINA-1162)                                */
+/* -------------------------------------------------------------------------- */
+
+export interface CharactersIndexOgInput {
+  /**
+   * Named characters in the deterministic display-order shipped to `/characters`.
+   * Each glyph gets the gold halo (everyone here is named) and the row caps
+   * at 10 — overflow rolls into a `+N MORE` pill underneath.
+   */
+  characters: Array<{ name: string; color: string | null }>;
+  /**
+   * Freshest moment headline across the named cast. Empty string falls back
+   * to a quiet line so a cold sim still produces a readable card.
+   */
+  headline: string;
+  /**
+   * Total characters in the named cast (pre-cap). Surfaced as the header
+   * subtitle chip and used to drive the overflow `+N MORE` pill.
+   */
+  totalCharacterCount: number;
+}
+
+/** Cap on glyph-row characters drawn into the OG card. Overflow shows `+N MORE`. */
+const CHARACTERS_INDEX_OG_GLYPH_CAP = 10;
+
+/**
+ * Compose a 1200×630 PNG card for `/characters`. Reuses the moments-index
+ * chrome (panel bars + accent palette + glyph row) but swaps in a
+ * `TINA · CHARACTERS` header, a chunky `MEET THE CAST` title, a single-row
+ * glyph strip of up to 10 characters with a 4-letter abbreviation row beneath
+ * each glyph, and a footer chip pairing the character count with the freshest
+ * moment headline. Deterministic — same input produces identical bytes, which
+ * is what the OG cache key relies on.
+ */
+export function composeCharactersIndexOg(input: CharactersIndexOgInput): Buffer {
+  const c = new PixelCanvas(OG_WIDTH, OG_HEIGHT);
+  c.fill(BG);
+
+  // Header bar.
+  c.fillRect(0, 0, OG_WIDTH, 80, PANEL);
+  c.drawText(48, 32, 'TINA · CHARACTERS', ACCENT, 4);
+  const subtitle = normalizeForFont(`${input.totalCharacterCount} CAST`);
+  const subtitleWidth = measureText(subtitle, 3);
+  c.drawText(OG_WIDTH - subtitleWidth - 48, 36, subtitle, MUTED, 3);
+
+  // Footer bar + branding.
+  c.fillRect(0, OG_HEIGHT - 80, OG_WIDTH, 80, PANEL);
+  c.drawText(48, OG_HEIGHT - 50, 'TINA · TINYHOUSE', ACCENT, 3);
+  const footerBadge = normalizeForFont(
+    input.totalCharacterCount === 1 ? '1 CHARACTER' : `${input.totalCharacterCount} CHARACTERS`,
+  );
+  const badgeW = measureText(footerBadge, 3);
+  c.drawText(OG_WIDTH - badgeW - 48, OG_HEIGHT - 50, footerBadge, MUTED, 3);
+
+  // Big "MEET THE CAST" title — visual anchor, mirrors zone/moments title scale.
+  const title = 'MEET THE CAST';
+  const titleScale = 8;
+  const titleW = measureText(title, titleScale);
+  const titleY = 140;
+  c.drawText(Math.floor((OG_WIDTH - titleW) / 2), titleY, title, FG, titleScale);
+
+  // Single-row glyph strip with 4-letter abbreviation row beneath. Cap at 10
+  // — extras get a "+N MORE" pill so the layout doesn't reflow on a wider
+  // roster. All glyphs get the gold halo (everyone here is named).
+  const parts = input.characters.slice(0, CHARACTERS_INDEX_OG_GLYPH_CAP);
+  const overflow = Math.max(0, input.totalCharacterCount - parts.length);
+  const glyphRadius = 32;
+  const haloRadius = glyphRadius + 8;
+  const glyphSpacing = 100;
+  const glyphCenterY = 310;
+
+  if (parts.length > 0) {
+    const totalWidth = parts.length * glyphSpacing - (glyphSpacing - 2 * haloRadius);
+    const startX = Math.floor((OG_WIDTH - totalWidth) / 2) + haloRadius;
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i]!;
+      const cx = startX + i * glyphSpacing;
+      const color = participantColor(p.color);
+      c.strokeCircle(cx, glyphCenterY, haloRadius, glyphRadius + 2, HALO);
+      c.fillCircle(cx, glyphCenterY, glyphRadius, color);
+      const initial = (p.name[0] ?? '?').toUpperCase();
+      const initialScale = 4;
+      const initialW = measureText(initial, initialScale);
+      const initialH = FONT_HEIGHT * initialScale;
+      c.drawText(
+        cx - Math.floor(initialW / 2),
+        glyphCenterY - Math.floor(initialH / 2),
+        initial,
+        BG,
+        initialScale,
+      );
+      // 4-letter abbreviation row beneath each glyph. Take the first 4 letters
+      // of the persona's first name, uppercased, so chunky pixel-art names
+      // don't run into each other when the roster is full.
+      const firstName = p.name.split(/\s+/, 1)[0] ?? p.name;
+      const abbrevRaw = normalizeForFont(firstName.slice(0, 4).toUpperCase());
+      if (abbrevRaw.length > 0) {
+        const abbrevScale = 2;
+        const abbrevW = measureText(abbrevRaw, abbrevScale);
+        c.drawText(
+          cx - Math.floor(abbrevW / 2),
+          glyphCenterY + haloRadius + 14,
+          abbrevRaw,
+          FG,
+          abbrevScale,
+        );
+      }
+    }
+  }
+  if (overflow > 0) {
+    const pill = normalizeForFont(`+${overflow} MORE`);
+    const w = measureText(pill, 3);
+    const pillY = parts.length > 0 ? glyphCenterY + haloRadius + 50 : glyphCenterY;
+    c.drawText(Math.floor((OG_WIDTH - w) / 2), pillY, pill, MUTED, 3);
+  }
+  if (parts.length === 0 && overflow === 0) {
+    const empty = normalizeForFont('NO CAST YET');
+    const w = measureText(empty, 4);
+    c.drawText(Math.floor((OG_WIDTH - w) / 2), glyphCenterY, empty, MUTED, 4);
+  }
+
+  // Footer headline — wraps to up to 2 lines, scale 4 to match other index
+  // cards. Empty headline falls back to a quiet line so a freshly booted sim
+  // with no recorded moments still produces a readable card.
+  const headlineSource = input.headline.trim() || 'the cast is waiting for their first moment';
+  const headline = normalizeForFont(headlineSource.toUpperCase());
+  const headlineScale = 4;
+  const headlineLineHeight = FONT_HEIGHT * headlineScale + 12;
+  const headlineMaxPx = OG_WIDTH - 96;
+  const lines = wrapText(headline, headlineMaxPx, headlineScale, 2);
+  const headlineBlockHeight = lines.length * headlineLineHeight - 12;
+  const headlineY = OG_HEIGHT - 80 - 40 - headlineBlockHeight;
+  for (let i = 0; i < lines.length; i++) {
+    const lineW = measureText(lines[i]!, headlineScale);
+    c.drawText(
+      Math.floor((OG_WIDTH - lineW) / 2),
+      headlineY + i * headlineLineHeight,
+      lines[i]!,
+      FG,
+      headlineScale,
+    );
+  }
+
+  return encodePng(OG_WIDTH, OG_HEIGHT, c.buf);
+}

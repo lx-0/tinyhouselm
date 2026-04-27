@@ -6,6 +6,7 @@ import {
   PixelCanvas,
   composeArcOg,
   composeCharacterOg,
+  composeCharactersIndexOg,
   composeMomentOg,
   composeMomentsIndexOg,
   composeZoneOg,
@@ -462,6 +463,80 @@ describe('composeMomentsIndexOg', () => {
       totalParticipantCount: 12,
     });
     // The overflow pill changes the bytes — proves the layout actually drew it.
+    expect(capped.equals(overflow)).toBe(false);
+  });
+});
+
+describe('composeCharactersIndexOg', () => {
+  const baseInput = {
+    characters: [
+      { name: 'Mei Tanaka', color: '#ffaaaa' },
+      { name: 'Hiro Abe', color: '#aaffff' },
+      { name: 'Ava Okafor', color: '#cccccc' },
+    ],
+    headline: 'Mei and Hiro caught up at the counter',
+    totalCharacterCount: 3,
+  };
+
+  test('renders a 1200x630 PNG for a populated cast', () => {
+    const png = composeCharactersIndexOg(baseInput);
+    expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    expect(png.readUInt32BE(16)).toBe(OG_WIDTH);
+    expect(png.readUInt32BE(20)).toBe(OG_HEIGHT);
+  });
+
+  test('is deterministic — same input produces the same bytes', () => {
+    const a = composeCharactersIndexOg(baseInput);
+    const b = composeCharactersIndexOg(baseInput);
+    expect(a.equals(b)).toBe(true);
+  });
+
+  test('different headlines produce different bytes', () => {
+    const a = composeCharactersIndexOg({ ...baseInput, headline: 'first headline' });
+    const b = composeCharactersIndexOg({ ...baseInput, headline: 'second totally different one' });
+    expect(a.equals(b)).toBe(false);
+  });
+
+  test('different cast produces different bytes', () => {
+    const a = composeCharactersIndexOg(baseInput);
+    const b = composeCharactersIndexOg({
+      ...baseInput,
+      characters: [
+        { name: 'Mei Tanaka', color: '#ffaaaa' },
+        { name: 'Hiro Abe', color: '#aaffff' },
+      ],
+      totalCharacterCount: 2,
+    });
+    expect(a.equals(b)).toBe(false);
+  });
+
+  test('falls back gracefully on an empty cast (no characters)', () => {
+    const png = composeCharactersIndexOg({
+      characters: [],
+      headline: '',
+      totalCharacterCount: 0,
+    });
+    expect(png.length).toBeGreaterThan(1000);
+    // Distinct from the populated case so the empty card caches separately.
+    const populated = composeCharactersIndexOg(baseInput);
+    expect(png.equals(populated)).toBe(false);
+  });
+
+  test('renders a "+N MORE" pill when totalCharacterCount exceeds 10', () => {
+    const ten = Array.from({ length: 10 }, (_, i) => ({
+      name: `Cast${i}`,
+      color: '#abcdef',
+    }));
+    const capped = composeCharactersIndexOg({
+      characters: ten,
+      headline: 'busy day',
+      totalCharacterCount: 10,
+    });
+    const overflow = composeCharactersIndexOg({
+      characters: ten,
+      headline: 'busy day',
+      totalCharacterCount: 14,
+    });
     expect(capped.equals(overflow)).toBe(false);
   });
 });
